@@ -36,7 +36,6 @@ class AqualiaClient:
         self.nif = nif
         self.password = password
         self.session = requests.Session()
-        self.xsrf_token: str | None = None
         self.token: str | None = None
         self.token_expires_at: datetime | None = None
 
@@ -52,26 +51,11 @@ class AqualiaClient:
             "Referer": "https://oficinavirtual.aqualia.es/",
         }
 
-    def _fetch_xsrf_token(self) -> None:
-        response = self.session.get(
-            "https://oficinavirtual.aqualia.es/",
-            headers=self._get_common_headers(),
-            timeout=10,
-        )
-        response.raise_for_status()
-        self.xsrf_token = self.session.cookies.get("XSRF-TOKEN")
-        if not self.xsrf_token:
-            raise AqualiaAuthError("No se encontró XSRF-TOKEN en la respuesta")
-
     def _login(self) -> None:
-        self._fetch_xsrf_token()
-        headers = self._get_common_headers()
-        headers["X-XSRF-TOKEN"] = self.xsrf_token or ""
-
         response = self.session.post(
             self.LOGIN_URL,
             json={"LoginType": 1, "User": self.nif, "Password": self.password},
-            headers=headers,
+            headers=self._get_common_headers(),
             timeout=10,
         )
         if response.status_code in (401, 403):
