@@ -28,6 +28,9 @@ class AqualiaClient:
     CONSUMPTION_URL = (
         f"{BASE_URL}/meter/v1/api/meter/Meter/GetContractConsumptionCurve"
     )
+    CONTRACTS_URL = (
+        f"{BASE_URL}/customer/v1/api/customer/Customer/GetContracts"
+    )
 
     def __init__(self, nif: str, password: str) -> None:
         self.nif = nif
@@ -206,6 +209,39 @@ class AqualiaClient:
             contract_number=contract_number,
         )
         return {"readings": readings, **ConsumptionParser(readings).parse()}
+
+    def get_contracts(self) -> list[dict[str, Any]] | None:
+        """Return contracts for the authenticated user.
+
+        Propagates AqualiaAuthError so callers can surface bad credentials.
+        Returns None when the endpoint is unavailable (caller falls back to
+        manual entry).
+        """
+        self._ensure_token()
+        headers = self._get_common_headers()
+        headers["Authorization"] = f"Bearer {self.token}"
+        try:
+            response = self.session.get(
+                self.CONTRACTS_URL, headers=headers, timeout=10
+            )
+            if response.status_code in (401, 403):
+                raise AqualiaAuthError("Aqualia rechazó la autenticación al listar contratos")
+            if response.status_code in (404, 405):
+                return None
+            response.raise_for_status()
+            data = response.json()
+            contracts: list[dict[str, Any]] | None = (
+                data
+                if isinstance(data, list)
+                else data.get("Data") or data.get("Contracts")
+            )
+            if not isinstance(contracts, list) or not contracts:
+                return None
+            return contracts
+        except AqualiaAuthError:
+            raise
+        except Exception:  # noqa: BLE001 - treat all other errors as unavailable
+            return None
 
     def close(self) -> None:
         self.session.close()

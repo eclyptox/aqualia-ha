@@ -2,11 +2,18 @@
   "config": {
     "step": {
       "user": {
-        "title": "Aqualia",
-        "description": "Introduce tus credenciales de Aqualia y los datos del contrato.",
+        "title": "Aqualia — Credenciales",
+        "description": "Introduce tus credenciales de Aqualia. Se intentará detectar los contratos automáticamente.",
         "data": {
           "nif": "NIF",
-          "password": "Contraseña",
+          "password": "Contraseña"
+        }
+      },
+      "contract": {
+        "title": "Aqualia — Contrato",
+        "description": "{discovery_note}",
+        "data": {
+          "contract_selector": "Contrato",
           "cac_code": "CAC Code",
           "contract_code": "Contract Code",
           "installation_code": "Installation Code",
