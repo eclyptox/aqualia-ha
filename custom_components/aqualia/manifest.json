@@ -5,6 +5,6 @@
   "config_flow": true,
   "documentation": "https://github.com/eclyptox/aqualia-ha-addon",
   "iot_class": "cloud_polling",
-  "requirements": ["requests==2.31.0"],
+  "requirements": ["requests>=2.28"],
   "version": "0.1.0"
 }

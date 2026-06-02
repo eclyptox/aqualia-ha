@@ -50,6 +50,9 @@
       },
       "last_reading_date": {
         "name": "Fecha de última lectura"
+      },
+      "total_consumption": {
+        "name": "Consumo total"
       }
     }
   }

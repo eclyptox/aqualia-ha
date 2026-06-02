@@ -193,7 +193,7 @@ class AqualiaClient:
         installation_code: int,
         contract_number: str,
     ) -> dict[str, Any]:
-        """Fetch readings and return parsed metrics."""
+        """Fetch readings and return parsed metrics plus the raw readings list."""
 
         date_to = datetime.now(UTC)
         date_from = date_to - timedelta(days=days_back)
@@ -205,7 +205,7 @@ class AqualiaClient:
             installation_code=installation_code,
             contract_number=contract_number,
         )
-        return ConsumptionParser(readings).parse()
+        return {"readings": readings, **ConsumptionParser(readings).parse()}
 
     def close(self) -> None:
         self.session.close()
