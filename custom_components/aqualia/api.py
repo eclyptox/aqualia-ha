@@ -185,7 +185,7 @@ class AqualiaClient:
         data = response.json()
         if isinstance(data, list):
             return data
-        return data.get("Data", [])
+        return data.get("ConsumptionCurves") or data.get("Data") or []
 
     def fetch_metrics(
         self,
@@ -253,15 +253,28 @@ class AqualiaClient:
 
 
 class ConsumptionParser:
-    """Parse Aqualia readings into Home Assistant sensor metrics."""
+    """Parse Aqualia readings into Home Assistant sensor metrics.
+
+    API field names (confirmed from GetContractConsumptionCurve response):
+      DateTimeConsumptionCurve  — ISO datetime of the reading
+      ConsumptionValue          — litres consumed in this interval
+      ReadingIndex              — cumulative meter total (odometer-style)
+    """
+
+    _DATE = "DateTimeConsumptionCurve"
+    _VALUE = "ConsumptionValue"
+    _INDEX = "ReadingIndex"
 
     def __init__(self, readings: list[dict[str, Any]]) -> None:
-        self.readings = sorted(readings, key=lambda item: _parse_datetime(item.get("Date")))
+        self.readings = sorted(
+            readings, key=lambda item: _parse_datetime(item.get(self._DATE))
+        )
 
     def parse(self) -> dict[str, Any]:
         if not self.readings:
             return {
                 "last_value": None,
+                "reading_index": None,
                 "last_reading_date": None,
                 "reading_gap_days": None,
                 "daily_normalized": None,
@@ -273,6 +286,7 @@ class ConsumptionParser:
 
         return {
             "last_value": self._last_value(),
+            "reading_index": self._reading_index(),
             "last_reading_date": self._last_reading_date(),
             "reading_gap_days": self._reading_gap_days(),
             "daily_normalized": self._daily_normalized(),
@@ -283,17 +297,20 @@ class ConsumptionParser:
         }
 
     def _last_value(self) -> float:
-        return float(self.readings[-1].get("Value", 0))
+        return float(self.readings[-1].get(self._VALUE, 0))
+
+    def _reading_index(self) -> float:
+        return float(self.readings[-1].get(self._INDEX, 0))
 
     def _last_reading_date(self) -> datetime:
-        return _parse_datetime(self.readings[-1].get("Date"))
+        return _parse_datetime(self.readings[-1].get(self._DATE))
 
     def _reading_gap_days(self) -> int:
         if len(self.readings) < 2:
             return 1
         gap = (
-            _parse_datetime(self.readings[-1].get("Date"))
-            - _parse_datetime(self.readings[-2].get("Date"))
+            _parse_datetime(self.readings[-1].get(self._DATE))
+            - _parse_datetime(self.readings[-2].get(self._DATE))
         ).days
         return max(1, gap)
 
@@ -305,21 +322,21 @@ class ConsumptionParser:
         month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
         total = 0.0
         for reading in self.readings:
-            date = _parse_datetime(reading.get("Date"))
+            date = _parse_datetime(reading.get(self._DATE))
             if date >= month_start:
-                total += float(reading.get("Value", 0))
+                total += float(reading.get(self._VALUE, 0))
         return total
 
     def _avg_daily_30d(self) -> float:
         thirty_days_ago = datetime.now(UTC) - timedelta(days=30)
         values: list[float] = []
         for index, reading in enumerate(self.readings):
-            date = _parse_datetime(reading.get("Date"))
+            date = _parse_datetime(reading.get(self._DATE))
             if date < thirty_days_ago:
                 continue
-            value = float(reading.get("Value", 0))
+            value = float(reading.get(self._VALUE, 0))
             if index > 0:
-                previous_date = _parse_datetime(self.readings[index - 1].get("Date"))
+                previous_date = _parse_datetime(self.readings[index - 1].get(self._DATE))
                 gap = max(1, (date - previous_date).days)
             else:
                 gap = 1

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -14,12 +13,10 @@ from homeassistant.components.sensor import (
 )
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import PERCENTAGE, UnitOfVolume
-from homeassistant.core import HomeAssistant, callback
+from homeassistant.core import HomeAssistant
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.restore_state import RestoreEntity
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
-from .api import _parse_datetime
 from .const import DOMAIN
 from .coordinator import AqualiaDataUpdateCoordinator
 
@@ -174,13 +171,12 @@ class AqualiaSensor(
 
 
 class AqualiaCumulativeSensor(
-    CoordinatorEntity[AqualiaDataUpdateCoordinator], RestoreEntity, SensorEntity
+    CoordinatorEntity[AqualiaDataUpdateCoordinator], SensorEntity
 ):
     """Cumulative water consumption sensor for the Energy Dashboard.
 
-    Accumulates all interval readings from the Aqualia API into a monotonically
-    increasing total. State is persisted across HA restarts via RestoreEntity so
-    readings already counted are never double-counted.
+    Uses ReadingIndex from the API — the physical meter's odometer reading —
+    which is already a monotonically increasing total in litres.
     """
 
     _attr_native_unit_of_measurement = UnitOfVolume.LITERS
@@ -199,51 +195,8 @@ class AqualiaCumulativeSensor(
         super().__init__(coordinator)
         self._attr_unique_id = f"{entry.entry_id}_total_consumption"
         self._attr_device_info = _device_info(entry)
-        self._total: float = 0.0
-        self._last_processed_date: datetime | None = None
-
-    async def async_added_to_hass(self) -> None:
-        await super().async_added_to_hass()
-        if (last_state := await self.async_get_last_state()) is not None:
-            try:
-                self._total = float(last_state.state)
-            except (ValueError, TypeError):
-                self._total = 0.0
-            if raw_date := last_state.attributes.get("last_processed_date"):
-                try:
-                    self._last_processed_date = datetime.fromisoformat(raw_date)
-                except (ValueError, TypeError):
-                    pass
-        self._process_readings()
-
-    def _process_readings(self) -> None:
-        data = self.coordinator.data
-        if not data:
-            return
-        for reading in sorted(
-            data.get("readings", []),
-            key=lambda r: _parse_datetime(r.get("Date")),
-        ):
-            date = _parse_datetime(reading.get("Date"))
-            if self._last_processed_date is None or date > self._last_processed_date:
-                self._total += float(reading.get("Value", 0))
-                self._last_processed_date = date
-
-    @callback
-    def _handle_coordinator_update(self) -> None:
-        self._process_readings()
-        self.async_write_ha_state()
 
     @property
-    def native_value(self) -> float:
-        return round(self._total, 0)
-
-    @property
-    def extra_state_attributes(self) -> dict[str, str | None]:
-        return {
-            "last_processed_date": (
-                self._last_processed_date.isoformat()
-                if self._last_processed_date
-                else None
-            )
-        }
+    def native_value(self) -> float | None:
+        value = self.coordinator.data.get("reading_index")
+        return round(value, 0) if value is not None else None
