@@ -29,7 +29,7 @@ class AqualiaClient:
         f"{BASE_URL}/meter/v1/api/meter/Meter/GetContractConsumptionCurve"
     )
     CONTRACTS_URL = (
-        f"{BASE_URL}/customer/v1/api/customer/Customer/GetContracts"
+        f"{BASE_URL}/contract/v1/api/contract/Contract/GetUserLinkedContracts"
     )
 
     def __init__(self, nif: str, password: str) -> None:
@@ -228,13 +228,20 @@ class AqualiaClient:
                 return None
             response.raise_for_status()
             data = response.json()
-            contracts: list[dict[str, Any]] | None = (
-                data
-                if isinstance(data, list)
-                else data.get("Data") or data.get("Contracts")
-            )
-            if not isinstance(contracts, list) or not contracts:
+            details = data.get("ContractDetails", [])
+            if not isinstance(details, list) or not details:
                 return None
+            # Flatten: merge ContractInfo fields with the address for display
+            contracts = []
+            for item in details:
+                info = item.get("ContractInfo", {})
+                contracts.append({
+                    "CacCode": info.get("CacCode"),
+                    "ContractCode": info.get("ContractCode"),
+                    "InstallationCode": info.get("InstallationCode"),
+                    "ContractNumber": info.get("ContractNumber"),
+                    "Address": item.get("SupplyAddress", ""),
+                })
             return contracts
         except AqualiaAuthError:
             raise
