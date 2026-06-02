@@ -1,76 +1,80 @@
 # Aqualia para Home Assistant
 
-Integracion personalizada para Home Assistant que consulta el consumo de agua de Aqualia y crea sensores nativos, sin MQTT ni add-on intermedio.
+Integración personalizada para Home Assistant que consulta el consumo de agua de Aqualia y crea sensores nativos, incluyendo un sensor acumulativo compatible con el **Energy Dashboard**.
 
-## Por que integracion nativa
+## Instalación con HACS (recomendado)
 
-- No requiere Mosquitto ni credenciales MQTT.
-- Se configura desde **Ajustes -> Dispositivos y servicios**.
-- Usa entidades nativas de Home Assistant con actualizacion periodica.
-- Reduce puntos de fallo frente al add-on MQTT.
+1. En Home Assistant ve a **HACS → Integraciones → ⋮ → Repositorios personalizados**.
+2. Añade `https://github.com/eclyptox/aqualia-ha` con categoría **Integración**.
+3. Busca **Aqualia** en HACS e instala.
+4. Reinicia Home Assistant.
+5. Ve a **Ajustes → Dispositivos y servicios → Añadir integración → Aqualia**.
 
-El add-on MQTT antiguo sigue en `aqualia/`, pero la ruta recomendada es `custom_components/aqualia`.
+## Instalación manual
+
+1. Copia `custom_components/aqualia` dentro de la carpeta `custom_components` de tu configuración de Home Assistant.
+2. Reinicia Home Assistant.
+3. Ve a **Ajustes → Dispositivos y servicios → Añadir integración → Aqualia**.
+
+## Configuración
+
+La integración usa un flujo de dos pasos:
+
+**Paso 1 — Credenciales**
+
+| Campo | Descripción |
+| --- | --- |
+| NIF | Tu NIF sin espacios (`12345678A`) |
+| Contraseña | Contraseña de tu cuenta Aqualia |
+
+**Paso 2 — Contrato**
+
+La integración intenta descubrir tus contratos automáticamente. Si tiene éxito, aparece un selector con todos tus contratos. Si no, introduce los códigos manualmente (ver sección siguiente).
+
+| Campo opcional | Descripción | Por defecto |
+| --- | --- | --- |
+| Intervalo de consulta | Minutos entre actualizaciones | 60 |
+| Días de histórico | Lecturas a recuperar en el primer arranque | 60 |
+
+## Cómo obtener los códigos del contrato (solo si el discovery falla)
+
+1. Entra en `https://oficinavirtual.aqualia.es/`.
+2. Abre DevTools del navegador (F12) → pestaña **Network**.
+3. Busca la petición `GetContractConsumptionCurve`.
+4. En el payload copia `Contract.CacCode`, `Contract.ContractCode`, `Contract.InstallationCode` y `Contract.ContractNumber`.
 
 ## Sensores
 
-La integracion crea estas entidades:
+La integración crea estas entidades bajo el dispositivo **Aqualia Water Meter**:
 
-| Sensor | Unidad | Descripcion |
+| Sensor | Unidad | Descripción |
 | --- | --- | --- |
-| Ultima lectura | L | Valor de la ultima lectura recibida |
-| Consumo diario normalizado | L/d | Consumo dividido por el gap de lectura |
-| Media 30 dias | L/d | Promedio movil de los ultimos 30 dias |
-| Ratio frente a media | % | Consumo normalizado frente a la media |
+| Consumo total | L | Acumulado histórico. Compatible con **Energy Dashboard** |
+| Última lectura | L | Valor de la última lectura recibida |
+| Consumo diario normalizado | L/d | Consumo dividido entre los días del gap |
+| Media 30 días | L/d | Promedio móvil de los últimos 30 días |
+| Ratio frente a media | % | Consumo normalizado vs media |
 | Total mensual | L | Suma de lecturas del mes actual |
-| Dias desde ultima lectura | d | Dias sin una lectura nueva |
-| Gap de lectura | d | Dias cubiertos por la ultima lectura |
-| Fecha de ultima lectura | timestamp | Fecha/hora de la ultima lectura |
+| Días desde última lectura | d | Días sin lectura nueva |
+| Gap de lectura | d | Días que cubre la última lectura |
+| Fecha de última lectura | timestamp | Fecha/hora de la última lectura |
 
-## Instalacion
+## Energy Dashboard
 
-1. Copia `custom_components/aqualia` dentro de la carpeta `custom_components` de tu Home Assistant.
-2. Reinicia Home Assistant.
-3. Ve a **Ajustes -> Dispositivos y servicios -> Anadir integracion**.
-4. Busca **Aqualia**.
-5. Introduce tus credenciales y datos del contrato.
+El sensor **Consumo total** tiene `device_class: water` y `state_class: total_increasing`. Para añadirlo:
 
-## Datos necesarios
+1. Ve a **Ajustes → Dashboards → Energía**.
+2. En la sección **Agua** añade el sensor `sensor.aqualia_total_consumption`.
 
-| Campo | Descripcion | Ejemplo |
-| --- | --- | --- |
-| `nif` | Tu NIF sin espacios | `12345678A` |
-| `password` | Contrasena de Aqualia | `MiContrasena123` |
-| `cac_code` | CAC Code del contrato | `6565462` |
-| `contract_code` | Contract Code | `38692` |
-| `installation_code` | Installation Code | `10302` |
-| `contract_number` | Numero completo de contrato | `10302-1/1-047339` |
-| `poll_interval_minutes` | Intervalo de consulta | `60` |
-| `days_back` | Historico a consultar | `60` |
+El total acumulado se conserva entre reinicios de Home Assistant gracias a `RestoreEntity`.
 
-## Como encontrar los datos del contrato
+## Notas técnicas
 
-1. Entra en https://oficinavirtual.aqualia.es/.
-2. Abre DevTools del navegador.
-3. En **Network**, busca la peticion `GetContractConsumptionCurve`.
-4. En el payload copia:
-   - `Contract.CacCode`
-   - `Contract.ContractCode`
-   - `Contract.InstallationCode`
-   - `Contract.ContractNumber`
-
-## Notas tecnicas
-
-- La integracion usa `DataUpdateCoordinator` y ejecuta las llamadas HTTP en executor.
-- El token JWT se mantiene en memoria y se renueva automaticamente antes de expirar.
-- Las lecturas de Aqualia pueden llegar con retraso y agrupadas; `daily_normalized` divide el valor por los dias del gap.
+- Usa `DataUpdateCoordinator` con llamadas HTTP en executor (cliente `requests` síncrono).
+- El token JWT se renueva automáticamente antes de expirar (margen de 5 minutos).
+- Las lecturas de Aqualia pueden llegar con retraso y agrupadas. `daily_normalized` divide el valor por los días del gap para normalizar.
 - Si la API devuelve 401, se fuerza un nuevo login y se reintenta una vez.
 
-## Desarrollo
+## Repositorio legacy
 
-Validar sintaxis:
-
-```bash
-python3 -c "import pathlib; [compile(p.read_text(), str(p), 'exec') for p in pathlib.Path('custom_components/aqualia').rglob('*.py')]"
-```
-
-La carpeta `aqualia/` conserva el add-on MQTT legacy, pero no es necesaria para la instalacion recomendada.
+La carpeta `aqualia/` conserva el add-on MQTT original. No es necesaria para la instalación recomendada.
