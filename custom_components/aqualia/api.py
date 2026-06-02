@@ -224,9 +224,7 @@ class AqualiaClient:
             response = self.session.get(
                 self.CONTRACTS_URL, headers=headers, timeout=10
             )
-            if response.status_code in (401, 403):
-                raise AqualiaAuthError("Aqualia rechazó la autenticación al listar contratos")
-            if response.status_code in (404, 405):
+            if response.status_code in (401, 403, 404, 405):
                 return None
             response.raise_for_status()
             data = response.json()
