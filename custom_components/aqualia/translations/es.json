@@ -1,0 +1,56 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Aqualia",
+        "description": "Introduce tus credenciales de Aqualia y los datos del contrato.",
+        "data": {
+          "nif": "NIF",
+          "password": "Contraseña",
+          "cac_code": "CAC Code",
+          "contract_code": "Contract Code",
+          "installation_code": "Installation Code",
+          "contract_number": "Número de contrato",
+          "poll_interval_minutes": "Intervalo de consulta (minutos)",
+          "days_back": "Días de histórico"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "No se pudo conectar con Aqualia.",
+      "invalid_auth": "Credenciales o datos de contrato incorrectos.",
+      "unknown": "Error inesperado."
+    },
+    "abort": {
+      "already_configured": "Este contrato ya está configurado."
+    }
+  },
+  "entity": {
+    "sensor": {
+      "last_value": {
+        "name": "Última lectura"
+      },
+      "daily_normalized": {
+        "name": "Consumo diario normalizado"
+      },
+      "avg_daily_30d": {
+        "name": "Media 30 días"
+      },
+      "ratio_vs_avg": {
+        "name": "Ratio frente a media"
+      },
+      "monthly_total": {
+        "name": "Total mensual"
+      },
+      "days_since_reading": {
+        "name": "Días desde última lectura"
+      },
+      "reading_gap_days": {
+        "name": "Gap de lectura"
+      },
+      "last_reading_date": {
+        "name": "Fecha de última lectura"
+      }
+    }
+  }
+}

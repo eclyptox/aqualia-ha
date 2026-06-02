@@ -1,0 +1,38 @@
+name: "Aqualia Water Consumption"
+description: "Integra el consumo de agua de Aqualia en Home Assistant vía MQTT"
+version: "1.0.0"
+slug: "aqualia"
+url: "https://github.com/eclyptox/aqualia-ha-addon"
+arch:
+  - aarch64
+  - amd64
+  - armv7
+init: false
+map:
+  - share:rw
+options:
+  nif: ""
+  password: ""
+  cac_code: 0
+  contract_code: 0
+  installation_code: 0
+  contract_number: ""
+  poll_interval_minutes: 60
+  days_back: 60
+  mqtt_host: "core-mosquitto"
+  mqtt_port: 1883
+  mqtt_user: ""
+  mqtt_password: ""
+schema:
+  nif: str
+  password: str
+  cac_code: int
+  contract_code: int
+  installation_code: int
+  contract_number: str
+  poll_interval_minutes: int(min=5, max=1440)
+  days_back: int(min=7, max=365)
+  mqtt_host: str
+  mqtt_port: int(min=1, max=65535)
+  mqtt_user: str
+  mqtt_password: str
