@@ -262,6 +262,7 @@ class ConsumptionParser:
                 "last_reading_date": None,
                 "reading_gap_days": None,
                 "daily_normalized": None,
+                "today_consumption": None,
                 "monthly_total": None,
                 "avg_daily_30d": None,
                 "ratio_vs_avg": None,
@@ -274,6 +275,7 @@ class ConsumptionParser:
             "last_reading_date": self._last_reading_date(),
             "reading_gap_days": self._reading_gap_days(),
             "daily_normalized": self._daily_normalized(),
+            "today_consumption": self._today_consumption(),
             "monthly_total": self._monthly_total(),
             "avg_daily_30d": self._avg_daily_30d(),
             "ratio_vs_avg": self._ratio_vs_avg(),
@@ -300,6 +302,14 @@ class ConsumptionParser:
 
     def _daily_normalized(self) -> float:
         return self._last_value() / self._reading_gap_days()
+
+    def _today_consumption(self) -> float:
+        today = datetime.now(UTC).date()
+        return sum(
+            float(r.get(self._VALUE, 0))
+            for r in self.readings
+            if _parse_datetime(r.get(self._DATE)).date() == today
+        )
 
     def _monthly_total(self) -> float:
         now = datetime.now(UTC)

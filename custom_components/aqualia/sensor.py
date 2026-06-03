@@ -20,6 +20,9 @@ from homeassistant.helpers.update_coordinator import CoordinatorEntity
 from .const import DOMAIN
 from .coordinator import AqualiaDataUpdateCoordinator
 
+# Readings older than this are considered stale → derived sensors go unavailable
+_STALE_DAYS = 7
+
 
 @dataclass(frozen=True)
 class AqualiaSensorDescription:
@@ -32,74 +35,87 @@ class AqualiaSensorDescription:
     state_class: SensorStateClass | None = None
     icon: str | None = None
     value_fn: Callable[[Any], Any] | None = None
+    # If True, sensor goes unavailable when data is stale (>_STALE_DAYS days old)
+    stale_unavailable: bool = False
 
 
 SENSORS: tuple[AqualiaSensorDescription, ...] = (
     AqualiaSensorDescription(
         key="last_value",
-        name="Last Reading",
+        name="Last Reading (Aqualia, may be delayed)",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.WATER,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:water",
-        value_fn=lambda value: round(value, 0) if value is not None else None,
+        value_fn=lambda v: round(v, 1) if v is not None else None,
     ),
     AqualiaSensorDescription(
-        key="daily_normalized",
-        name="Daily Normalized Consumption",
-        native_unit_of_measurement="L/d",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:water-percent",
-        value_fn=lambda value: round(value, 2) if value is not None else None,
-    ),
-    AqualiaSensorDescription(
-        key="avg_daily_30d",
-        name="30 Day Average",
-        native_unit_of_measurement="L/d",
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:chart-line",
-        value_fn=lambda value: round(value, 2) if value is not None else None,
-    ),
-    AqualiaSensorDescription(
-        key="ratio_vs_avg",
-        name="Ratio vs 30 Day Average",
-        native_unit_of_measurement=PERCENTAGE,
-        state_class=SensorStateClass.MEASUREMENT,
-        icon="mdi:percent",
-        value_fn=lambda value: round(value, 1) if value is not None else None,
+        key="today_consumption",
+        name="Consumed Today (Aqualia)",
+        native_unit_of_measurement=UnitOfVolume.LITERS,
+        device_class=SensorDeviceClass.WATER,
+        state_class=SensorStateClass.TOTAL,
+        icon="mdi:water-outline",
+        value_fn=lambda v: round(v, 1) if v is not None else None,
+        stale_unavailable=True,
     ),
     AqualiaSensorDescription(
         key="monthly_total",
-        name="Monthly Total",
+        name="Consumed This Month (Aqualia)",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.WATER,
         state_class=SensorStateClass.TOTAL,
         icon="mdi:water",
-        value_fn=lambda value: round(value, 0) if value is not None else None,
+        value_fn=lambda v: round(v, 1) if v is not None else None,
+        stale_unavailable=True,
+    ),
+    AqualiaSensorDescription(
+        key="daily_normalized",
+        name="Estimated Daily Consumption (Aqualia)",
+        native_unit_of_measurement="L/d",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:water-percent",
+        value_fn=lambda v: round(v, 1) if v is not None else None,
+        stale_unavailable=True,
+    ),
+    AqualiaSensorDescription(
+        key="avg_daily_30d",
+        name="30-Day Average Daily Consumption (Aqualia)",
+        native_unit_of_measurement="L/d",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:chart-line",
+        value_fn=lambda v: round(v, 1) if v is not None else None,
+    ),
+    AqualiaSensorDescription(
+        key="ratio_vs_avg",
+        name="Consumption vs 30-Day Average (Aqualia)",
+        native_unit_of_measurement=PERCENTAGE,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:percent",
+        value_fn=lambda v: round(v, 1) if v is not None else None,
+        stale_unavailable=True,
     ),
     AqualiaSensorDescription(
         key="days_since_reading",
-        name="Days Since Last Reading",
+        name="Days Since Last Aqualia Reading",
         native_unit_of_measurement="d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:calendar-clock",
     ),
     AqualiaSensorDescription(
         key="reading_gap_days",
-        name="Reading Gap",
+        name="Last Reading Gap (Aqualia)",
         native_unit_of_measurement="d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:calendar-range",
     ),
     AqualiaSensorDescription(
         key="last_reading_date",
-        name="Last Reading Date",
+        name="Last Reading Date (Aqualia)",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:calendar-check",
     ),
 )
-
-_DEVICE_INFO_KEYS = {"identifiers", "manufacturer", "name"}
 
 
 def _device_info(entry: ConfigEntry) -> dict:
@@ -141,7 +157,6 @@ class AqualiaSensor(
         super().__init__(coordinator)
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
-        self._attr_translation_key = description.key
         self._attr_has_entity_name = True
         self._attr_name = description.name
         self._attr_device_info = _device_info(entry)
@@ -163,11 +178,32 @@ class AqualiaSensor(
         return self.entity_description.icon
 
     @property
+    def available(self) -> bool:
+        if not super().available:
+            return False
+        if self.entity_description.stale_unavailable:
+            days = self.coordinator.data.get("days_since_reading") if self.coordinator.data else None
+            if days is None or days > _STALE_DAYS:
+                return False
+        return True
+
+    @property
     def native_value(self) -> Any:
+        if self.coordinator.data is None:
+            return None
         value = self.coordinator.data.get(self.entity_description.key)
         if self.entity_description.value_fn:
             return self.entity_description.value_fn(value)
         return value
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        days = self.coordinator.data.get("days_since_reading")
+        if days is None:
+            return {}
+        return {"days_since_reading": days}
 
 
 class AqualiaCumulativeSensor(
@@ -175,8 +211,9 @@ class AqualiaCumulativeSensor(
 ):
     """Cumulative water consumption sensor for the Energy Dashboard.
 
-    Uses ReadingIndex from the API — the physical meter's odometer reading —
-    which is already a monotonically increasing total in litres.
+    Reflects ReadingIndex from the API — the physical meter odometer value.
+    Note: Aqualia readings are typically delayed 2–3 days and may arrive
+    batched, so this value lags behind real-time consumption.
     """
 
     _attr_native_unit_of_measurement = UnitOfVolume.LITERS
@@ -184,8 +221,7 @@ class AqualiaCumulativeSensor(
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_icon = "mdi:water-plus"
     _attr_has_entity_name = True
-    _attr_name = "Total Consumption"
-    _attr_translation_key = "total_consumption"
+    _attr_name = "Total Consumption (Aqualia meter index)"
 
     def __init__(
         self,
@@ -198,5 +234,21 @@ class AqualiaCumulativeSensor(
 
     @property
     def native_value(self) -> float | None:
+        if self.coordinator.data is None:
+            return None
         value = self.coordinator.data.get("reading_index")
-        return round(value, 0) if value is not None else None
+        return round(value, 1) if value is not None else None
+
+    @property
+    def extra_state_attributes(self) -> dict[str, Any]:
+        if self.coordinator.data is None:
+            return {}
+        attrs: dict[str, Any] = {}
+        days = self.coordinator.data.get("days_since_reading")
+        if days is not None:
+            attrs["days_since_reading"] = days
+            attrs["data_delayed"] = days > 0
+        last_date = self.coordinator.data.get("last_reading_date")
+        if last_date is not None:
+            attrs["last_reading_date"] = last_date.isoformat()
+        return attrs
