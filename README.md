@@ -47,26 +47,33 @@ La integración intenta descubrir tus contratos automáticamente. Si tiene éxit
 
 La integración crea estas entidades bajo el dispositivo **Aqualia Water Meter**:
 
-| Sensor | Unidad | Descripción |
-| --- | --- | --- |
-| Consumo total | L | Acumulado histórico. Compatible con **Energy Dashboard** |
-| Última lectura | L | Valor de la última lectura recibida |
-| Consumo diario normalizado | L/d | Consumo dividido entre los días del gap |
-| Media 30 días | L/d | Promedio móvil de los últimos 30 días |
-| Ratio frente a media | % | Consumo normalizado vs media |
-| Total mensual | L | Suma de lecturas del mes actual |
-| Días desde última lectura | d | Días sin lectura nueva |
-| Gap de lectura | d | Días que cubre la última lectura |
-| Fecha de última lectura | timestamp | Fecha/hora de la última lectura |
+| Sensor | Unidad | Descripción | Se pone unavailable si… |
+| --- | --- | --- | --- |
+| Consumo total (índice contador) | L | Odómetro del contador. Compatible con **Energy Dashboard** | API caída |
+| Última lectura | L | Valor de la última lectura recibida (puede tener 2-3 días de retraso) | API caída |
+| Consumido hoy | L | Suma de lecturas fechadas hoy (0 si Aqualia aún no las envió) | Sin lecturas >7 días |
+| Consumido este mes | L | Suma de lecturas del mes actual | Sin lecturas >7 días |
+| Consumo diario estimado | L/d | Última lectura dividida entre los días del gap | Sin lecturas >7 días |
+| Media 30 días | L/d | Promedio móvil de los últimos 30 días | API caída |
+| Ratio frente a media | % | Consumo estimado vs media | Sin lecturas >7 días |
+| Días desde última lectura | d | Días sin lectura nueva de Aqualia | API caída |
+| Gap de lectura | d | Días que cubre la última lectura | API caída |
+| Fecha de última lectura | timestamp | Fecha/hora de la última lectura | API caída |
+
+> **Nota sobre el retraso:** Aqualia envía lecturas con 2-3 días de retraso y a veces las agrupa
+> (p.ej. 3 días sin leer → una sola lectura con el triple del consumo normal). El sensor
+> *Consumo diario estimado* divide el valor por el gap para corregirlo. Los sensores derivados
+> (hoy, este mes, estimado, ratio) pasan a `unavailable` automáticamente si no llega ninguna
+> lectura en más de 7 días, para que las automatizaciones de alerta se activen correctamente.
 
 ## Energy Dashboard
 
-El sensor **Consumo total** tiene `device_class: water` y `state_class: total_increasing`. Para añadirlo:
+El sensor **Consumo total (índice contador)** tiene `device_class: water` y `state_class: total_increasing`. Para añadirlo:
 
 1. Ve a **Ajustes → Dashboards → Energía**.
 2. En la sección **Agua** añade el sensor `sensor.aqualia_total_consumption`.
 
-El total acumulado se conserva entre reinicios de Home Assistant gracias a `RestoreEntity`.
+Los atributos del sensor incluyen `days_since_reading` y `data_delayed` para saber si el valor está actualizado.
 
 ## Notas técnicas
 
@@ -74,6 +81,7 @@ El total acumulado se conserva entre reinicios de Home Assistant gracias a `Rest
 - El token JWT se renueva automáticamente antes de expirar (margen de 5 minutos).
 - Las lecturas de Aqualia pueden llegar con retraso y agrupadas. `daily_normalized` divide el valor por los días del gap para normalizar.
 - Si la API devuelve 401, se fuerza un nuevo login y se reintenta una vez.
+- Los sensores con datos derivados pasan a `unavailable` tras 7 días sin lectura, lo que permite crear automatizaciones de alerta con el trigger `state → unavailable`.
 
 ## Repositorio legacy
 
