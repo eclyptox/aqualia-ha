@@ -1,5 +1,10 @@
 # Aqualia para Home Assistant
 
+[![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?logo=homeassistantcommunitystore&logoColor=white)](https://github.com/hacs/integration)
+[![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
+[![Tests](https://img.shields.io/badge/tests-74%20passed-brightgreen?logo=pytest&logoColor=white)](tests/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Integración personalizada para Home Assistant que consulta el consumo de agua de Aqualia y crea sensores nativos, incluyendo un sensor acumulativo compatible con el **Energy Dashboard**.
 
 ## Instalación con HACS (recomendado)
