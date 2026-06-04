@@ -98,6 +98,20 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         data = self.entry.data
         end = datetime.now(UTC)
         start = end - timedelta(days=730)
+
+        municipality_code = data.get(CONF_MUNICIPALITY_CODE, "")
+        entry_date = data.get(CONF_ENTRY_DATE, "")
+        contract_status_code = data.get(CONF_CONTRACT_STATUS_CODE, 0)
+        contract_status = data.get(CONF_CONTRACT_STATUS, "")
+
+        # Old config entries (installed before this field was captured) lack the
+        # full ContractIdentifier.  Resolve it on-the-fly from GetUserLinkedContracts
+        # so existing users don't need to delete and re-add the integration.
+        if not municipality_code:
+            municipality_code, entry_date, contract_status_code, contract_status = (
+                await self._resolve_contract_identifier()
+            )
+
         try:
             documents = await self.hass.async_add_executor_job(
                 partial(
@@ -108,13 +122,39 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     contract_code=data[CONF_CONTRACT_CODE],
                     installation_code=data[CONF_INSTALLATION_CODE],
                     contract_number=data[CONF_CONTRACT_NUMBER],
-                    municipality_code=data.get(CONF_MUNICIPALITY_CODE, ""),
-                    entry_date=data.get(CONF_ENTRY_DATE, ""),
-                    contract_status_code=data.get(CONF_CONTRACT_STATUS_CODE, 0),
-                    contract_status=data.get(CONF_CONTRACT_STATUS, ""),
+                    municipality_code=municipality_code,
+                    entry_date=entry_date,
+                    contract_status_code=contract_status_code,
+                    contract_status=contract_status,
                 )
             )
             self._cached_invoice_data = InvoiceParser(documents, avg_daily_30d).parse()
             self._last_invoice_fetch = datetime.now(UTC)
         except Exception as err:
             _LOGGER.warning("Aqualia invoice fetch failed, using cached data: %s", err)
+
+    async def _resolve_contract_identifier(self) -> tuple[str, str, int, str]:
+        """Fetch ContractIdentifier fields from GetUserLinkedContracts.
+
+        Used when the config entry was created before these fields were captured
+        during discovery, so existing users don't need to reconfigure.
+        Returns (municipality_code, entry_date, contract_status_code, contract_status).
+        """
+        target = str(self.entry.data[CONF_CONTRACT_NUMBER])
+        try:
+            contracts = await self.hass.async_add_executor_job(self.client.get_contracts)
+            if contracts:
+                match = next(
+                    (c for c in contracts if str(c.get("ContractNumber", "")) == target),
+                    None,
+                )
+                if match:
+                    return (
+                        match.get("MunicipalityCode", ""),
+                        match.get("EntryDate", ""),
+                        match.get("ContractStatusCode", 0) or 0,
+                        match.get("ContractStatus", ""),
+                    )
+        except Exception as err:
+            _LOGGER.debug("Could not resolve ContractIdentifier for invoice fetch: %s", err)
+        return ("", "", 0, "")
