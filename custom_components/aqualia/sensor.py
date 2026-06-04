@@ -68,7 +68,6 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
         key="last_value",
         name="Last Reading (Aqualia, may be delayed)",
         native_unit_of_measurement=UnitOfVolume.LITERS,
-        device_class=SensorDeviceClass.WATER,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:water",
         value_fn=lambda v: round(v, 1) if v is not None else None,

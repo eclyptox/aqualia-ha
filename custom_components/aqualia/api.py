@@ -327,7 +327,7 @@ class AqualiaClient:
             self.INVOICES_URL,
             json=body,
             headers=headers,
-            timeout=10,
+            timeout=30,
         )
         if response.status_code == 401:
             return None
