@@ -231,3 +231,110 @@ class TestGetContracts:
         with patch.object(client, "_ensure_token", side_effect=AqualiaAuthError("bad")):
             with pytest.raises(AqualiaAuthError):
                 client.get_contracts()
+
+    def test_returns_additional_contract_identifier_fields(self):
+        client = self._client_with_token()
+        api_resp = {
+            "ContractDetails": [
+                {
+                    "ContractInfo": {
+                        "CacCode": 111,
+                        "ContractCode": 222,
+                        "InstallationCode": 333,
+                        "ContractNumber": "333-1/1-000001",
+                        "MunicipalityCode": "3063000100",
+                        "EntryDate": "21/12/2005 9:58:36",
+                        "ContractStatusCode": 3,
+                        "ContractStatus": "Alta definitiva",
+                    },
+                    "SupplyAddress": "Calle Falsa 123",
+                }
+            ]
+        }
+        with patch.object(client.session, "get") as mock_get:
+            mock_get.return_value = _make_response(200, api_resp)
+            result = client.get_contracts()
+        assert result[0]["MunicipalityCode"] == "3063000100"
+        assert result[0]["EntryDate"] == "21/12/2005 9:58:36"
+        assert result[0]["ContractStatusCode"] == 3
+        assert result[0]["ContractStatus"] == "Alta definitiva"
+
+
+def _invoice_kwargs() -> dict:
+    return dict(
+        start_date=datetime(2025, 1, 1, tzinfo=UTC),
+        end_date=datetime(2026, 6, 1, tzinfo=UTC),
+        cac_code=100,
+        contract_code=200,
+        installation_code=300,
+        contract_number="300-1/1-000001",
+    )
+
+
+class TestGetInvoices:
+    def _client_with_token(self) -> AqualiaClient:
+        c = AqualiaClient("12345678A", "pass")
+        c.token = "tok"
+        c.token_expires_at = datetime.now(UTC) + timedelta(hours=4)
+        return c
+
+    def test_returns_payment_documents(self):
+        client = self._client_with_token()
+        docs = [{"TotalAmount": 52.77, "Period": "Mar-Abr / 2026", "Status": "Pagado"}]
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.return_value = _make_response(200, {"PaymentDocuments": docs})
+            result = client.get_invoices(**_invoice_kwargs())
+        assert result == docs
+
+    def test_returns_empty_list_when_no_documents(self):
+        client = self._client_with_token()
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.return_value = _make_response(200, {"PaymentDocuments": []})
+            result = client.get_invoices(**_invoice_kwargs())
+        assert result == []
+
+    def test_401_forces_relogin_and_retries(self):
+        client = self._client_with_token()
+        docs = [{"TotalAmount": 52.77}]
+        responses = [
+            _make_response(401),
+            _make_response(200, {"PaymentDocuments": docs}),
+        ]
+        with patch.object(client.session, "post", side_effect=responses):
+            with patch.object(client, "_login"):
+                result = client.get_invoices(**_invoice_kwargs())
+        assert result == docs
+
+    def test_401_twice_raises_auth_error(self):
+        client = self._client_with_token()
+        with patch.object(client.session, "post", return_value=_make_response(401)):
+            with patch.object(client, "_login"):
+                with pytest.raises(AqualiaAuthError):
+                    client.get_invoices(**_invoice_kwargs())
+
+    def test_403_raises_auth_error_immediately(self):
+        client = self._client_with_token()
+        with patch.object(client.session, "post", return_value=_make_response(403)):
+            with pytest.raises(AqualiaAuthError):
+                client.get_invoices(**_invoice_kwargs())
+
+    def test_sends_full_contract_identifier(self):
+        client = self._client_with_token()
+        captured = {}
+        def mock_post(url, json=None, **kwargs):
+            captured.update(json or {})
+            return _make_response(200, {"PaymentDocuments": []})
+        with patch.object(client.session, "post", side_effect=mock_post):
+            client.get_invoices(
+                **_invoice_kwargs(),
+                municipality_code="3063000100",
+                entry_date="21/12/2005 9:58:36",
+                contract_status_code=3,
+                contract_status="Alta definitiva",
+            )
+        ident = captured["ContractIdentifier"]
+        assert ident["MunicipalityCode"] == "3063000100"
+        assert ident["EntryDate"] == "21/12/2005 9:58:36"
+        assert ident["ContractStatusCode"] == 3
+        assert ident["ContractStatus"] == "Alta definitiva"
+        assert captured.get("HasDebt") is None

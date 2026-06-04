@@ -6,7 +6,7 @@ from unittest.mock import MagicMock, PropertyMock
 
 import pytest
 
-from aqualia.sensor import AqualiaSensor, AqualiaCumulativeSensor, SENSORS, _STALE_DAYS
+from aqualia.sensor import AqualiaSensor, AqualiaCumulativeSensor, SENSORS, INVOICE_SENSORS, _STALE_DAYS
 
 
 def _make_coordinator(
@@ -272,3 +272,129 @@ class TestSensorDescriptions:
         for desc in SENSORS:
             if desc.key in stable_keys:
                 assert desc.stale_unavailable is False, f"{desc.key} should NOT have stale_unavailable"
+
+
+# ── Invoice sensors ───────────────────────────────────────────────────────────
+
+def _invoice_data() -> dict:
+    """Coordinator data dict with invoice fields populated."""
+    return {
+        "reading_index": 500_000.0,
+        "last_reading_date": _recent_date(1),
+        "days_since_reading": 1,
+        "avg_daily_30d": 100.0,
+        # invoice fields
+        "latest_invoice_amount": 52.77,
+        "latest_invoice_period": "Mar-Abr / 2026",
+        "latest_invoice_due_date": datetime(2026, 6, 23, tzinfo=UTC),
+        "latest_invoice_status": "Pagado",
+        "pending_invoice_amount": 0.0,
+        "avg_invoice_amount": 52.88,
+        "water_price_per_m3": 8.6678,
+    }
+
+
+def _make_invoice_sensor(key: str, data: dict | None) -> AqualiaSensor:
+    desc = next(d for d in INVOICE_SENSORS if d.key == key)
+    coord = _make_coordinator(data)
+    entry = _make_entry()
+    sensor = AqualiaSensor(coord, entry, desc)
+    type(sensor).coordinator = PropertyMock(return_value=coord)
+    return sensor
+
+
+class TestInvoiceSensorAvailability:
+    def test_available_when_invoice_data_present(self):
+        sensor = _make_invoice_sensor("latest_invoice_amount", _invoice_data())
+        assert sensor.available is True
+
+    def test_unavailable_when_coordinator_data_is_none(self):
+        sensor = _make_invoice_sensor("latest_invoice_amount", None)
+        assert sensor.available is False
+
+    def test_unavailable_when_invoice_key_is_none(self):
+        data = {**_invoice_data(), "latest_invoice_amount": None}
+        sensor = _make_invoice_sensor("latest_invoice_amount", data)
+        assert sensor.available is False
+
+    def test_available_even_when_api_fetch_failed(self):
+        # Invoice sensors stay available as long as coordinator.data is not None
+        # and the key has a value (data is stale-cached from last good fetch)
+        sensor = _make_invoice_sensor("water_price_per_m3", _invoice_data())
+        assert sensor.available is True
+
+    def test_pending_amount_unavailable_when_missing(self):
+        data = {**_invoice_data(), "pending_invoice_amount": None}
+        sensor = _make_invoice_sensor("pending_invoice_amount", data)
+        assert sensor.available is False
+
+    def test_water_price_unavailable_when_missing(self):
+        data = {**_invoice_data(), "water_price_per_m3": None}
+        sensor = _make_invoice_sensor("water_price_per_m3", data)
+        assert sensor.available is False
+
+
+class TestInvoiceSensorValues:
+    def test_latest_invoice_amount_value(self):
+        sensor = _make_invoice_sensor("latest_invoice_amount", _invoice_data())
+        assert sensor.native_value == pytest.approx(52.77)
+
+    def test_water_price_value_rounded(self):
+        sensor = _make_invoice_sensor("water_price_per_m3", _invoice_data())
+        assert sensor.native_value == pytest.approx(8.6678)
+
+    def test_pending_amount_value(self):
+        sensor = _make_invoice_sensor("pending_invoice_amount", _invoice_data())
+        assert sensor.native_value == pytest.approx(0.0)
+
+    def test_due_date_is_timestamp(self):
+        sensor = _make_invoice_sensor("latest_invoice_due_date", _invoice_data())
+        val = sensor.native_value
+        assert isinstance(val, datetime)
+
+    def test_avg_invoice_amount(self):
+        sensor = _make_invoice_sensor("avg_invoice_amount", _invoice_data())
+        assert sensor.native_value == pytest.approx(52.88)
+
+
+class TestInvoiceSensorAttributes:
+    def test_latest_amount_includes_period_and_status(self):
+        sensor = _make_invoice_sensor("latest_invoice_amount", _invoice_data())
+        attrs = sensor.extra_state_attributes
+        assert attrs["latest_invoice_period"] == "Mar-Abr / 2026"
+        assert attrs["latest_invoice_status"] == "Pagado"
+
+    def test_invoice_sensors_do_not_expose_days_since_reading(self):
+        # days_since_reading is a consumption staleness metric, irrelevant for invoices
+        sensor = _make_invoice_sensor("latest_invoice_amount", _invoice_data())
+        attrs = sensor.extra_state_attributes
+        assert "days_since_reading" not in attrs
+
+    def test_consumption_sensors_still_expose_days_since_reading(self):
+        sensor = _make_sensor("last_value", {"last_value": 100.0, "days_since_reading": 3})
+        attrs = sensor.extra_state_attributes
+        assert "days_since_reading" in attrs
+
+
+class TestInvoiceSensorDescriptions:
+    def test_all_invoice_keys_unique(self):
+        keys = [d.key for d in INVOICE_SENSORS]
+        assert len(keys) == len(set(keys))
+
+    def test_all_invoice_sensors_have_requires_data(self):
+        for desc in INVOICE_SENSORS:
+            assert desc.requires_data is True, f"{desc.key} must have requires_data=True"
+
+    def test_no_invoice_sensor_has_stale_unavailable(self):
+        for desc in INVOICE_SENSORS:
+            assert desc.stale_unavailable is False, f"{desc.key} must not have stale_unavailable"
+
+    def test_water_price_has_measurement_state_class(self):
+        desc = next(d for d in INVOICE_SENSORS if d.key == "water_price_per_m3")
+        from aqualia.sensor import SensorStateClass
+        assert desc.state_class == SensorStateClass.MEASUREMENT
+
+    def test_invoice_amount_has_monetary_device_class(self):
+        desc = next(d for d in INVOICE_SENSORS if d.key == "latest_invoice_amount")
+        from aqualia.sensor import SensorDeviceClass
+        assert desc.device_class == SensorDeviceClass.MONETARY

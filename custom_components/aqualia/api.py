@@ -31,6 +31,9 @@ class AqualiaClient:
     CONTRACTS_URL = (
         f"{BASE_URL}/contract/v1/api/contract/Contract/GetUserLinkedContracts"
     )
+    INVOICES_URL = (
+        f"{BASE_URL}/invoice/v1/api/invoice/Invoice/GetList"
+    )
 
     def __init__(self, nif: str, password: str) -> None:
         self.nif = nif
@@ -215,7 +218,9 @@ class AqualiaClient:
             details = data.get("ContractDetails", [])
             if not isinstance(details, list) or not details:
                 return None
-            # Flatten: merge ContractInfo fields with the address for display
+            # Flatten: merge ContractInfo fields with the address for display.
+            # We capture the full ContractIdentifier so the invoice API works
+            # without asking the user to enter these values manually.
             contracts = []
             for item in details:
                 info = item.get("ContractInfo", {})
@@ -224,6 +229,10 @@ class AqualiaClient:
                     "ContractCode": info.get("ContractCode"),
                     "InstallationCode": info.get("InstallationCode"),
                     "ContractNumber": info.get("ContractNumber"),
+                    "MunicipalityCode": str(info.get("MunicipalityCode", "")),
+                    "EntryDate": str(info.get("EntryDate", "")),
+                    "ContractStatusCode": info.get("ContractStatusCode", 0) or 0,
+                    "ContractStatus": str(info.get("ContractStatus", "")),
                     "Address": item.get("SupplyAddress", ""),
                 })
             return contracts
@@ -231,6 +240,101 @@ class AqualiaClient:
             raise
         except Exception:  # noqa: BLE001 - treat all other errors as unavailable
             return None
+
+    def get_invoices(
+        self,
+        *,
+        start_date: datetime,
+        end_date: datetime,
+        cac_code: int,
+        contract_code: int,
+        installation_code: int,
+        contract_number: str,
+        municipality_code: str = "",
+        entry_date: str = "",
+        contract_status_code: int = 0,
+        contract_status: str = "",
+    ) -> list[dict[str, Any]]:
+        """Return payment documents for the given date range."""
+        self._ensure_token()
+        documents = self._request_invoices(
+            start_date=start_date,
+            end_date=end_date,
+            cac_code=cac_code,
+            contract_code=contract_code,
+            installation_code=installation_code,
+            contract_number=contract_number,
+            municipality_code=municipality_code,
+            entry_date=entry_date,
+            contract_status_code=contract_status_code,
+            contract_status=contract_status,
+        )
+        if documents is not None:
+            return documents
+
+        self.token = None
+        self.token_expires_at = None
+        self._ensure_token()
+        documents = self._request_invoices(
+            start_date=start_date,
+            end_date=end_date,
+            cac_code=cac_code,
+            contract_code=contract_code,
+            installation_code=installation_code,
+            contract_number=contract_number,
+            municipality_code=municipality_code,
+            entry_date=entry_date,
+            contract_status_code=contract_status_code,
+            contract_status=contract_status,
+        )
+        if documents is None:
+            raise AqualiaAuthError("Token expirado o rechazado por Aqualia")
+        return documents
+
+    def _request_invoices(
+        self,
+        *,
+        start_date: datetime,
+        end_date: datetime,
+        cac_code: int,
+        contract_code: int,
+        installation_code: int,
+        contract_number: str,
+        municipality_code: str,
+        entry_date: str,
+        contract_status_code: int,
+        contract_status: str,
+    ) -> list[dict[str, Any]] | None:
+        headers = self._get_common_headers()
+        headers["Authorization"] = f"Bearer {self.token}"
+        body = {
+            "StartDate": _format_aqualia_datetime(start_date),
+            "EndDate": _format_aqualia_datetime(end_date),
+            "ContractIdentifier": {
+                "CacCode": cac_code,
+                "ContractCode": contract_code,
+                "ContractNumber": contract_number,
+                "InstallationCode": installation_code,
+                "MunicipalityCode": municipality_code,
+                "EntryDate": entry_date,
+                "ContractStatusCode": contract_status_code,
+                "ContractStatus": contract_status,
+                "styleClass": "",
+            },
+            "HasDebt": None,
+        }
+        response = self.session.post(
+            self.INVOICES_URL,
+            json=body,
+            headers=headers,
+            timeout=10,
+        )
+        if response.status_code == 401:
+            return None
+        if response.status_code == 403:
+            raise AqualiaAuthError("Aqualia rechazó la autenticación")
+        response.raise_for_status()
+        return response.json().get("PaymentDocuments", [])
 
     def close(self) -> None:
         self.session.close()
@@ -345,6 +449,82 @@ class ConsumptionParser:
 
     def _days_since_reading(self) -> int:
         return max(0, (datetime.now(UTC) - self._last_reading_date()).days)
+
+
+class InvoiceParser:
+    """Parse Aqualia PaymentDocuments into Home Assistant sensor metrics.
+
+    water_price_per_m3 is an *effective* price (fixed charges + variable
+    cost) computed by dividing the average invoice amount by the estimated
+    water volume consumed during a typical billing period.  It is useful
+    as a price sensor for the HA Energy Dashboard, but does not reflect the
+    marginal per-m³ tariff shown on the invoice breakdown.
+    """
+
+    _TYPICAL_BILLING_DAYS = 61  # Aqualia bills every ~2 months
+
+    def __init__(
+        self,
+        documents: list[dict[str, Any]],
+        avg_daily_liters: float | None = None,
+    ) -> None:
+        self.documents = sorted(
+            documents,
+            key=lambda d: d.get("IssueDate", ""),
+            reverse=True,
+        )
+        self.avg_daily_liters = avg_daily_liters
+
+    def parse(self) -> dict[str, Any]:
+        if not self.documents:
+            return {
+                "latest_invoice_amount": None,
+                "latest_invoice_period": None,
+                "latest_invoice_due_date": None,
+                "latest_invoice_status": None,
+                "pending_invoice_amount": None,
+                "avg_invoice_amount": None,
+                "water_price_per_m3": None,
+            }
+
+        latest = self.documents[0]
+        pending = round(sum(d.get("PendingAmount", 0) for d in self.documents), 2)
+        amounts = [d["TotalAmount"] for d in self.documents if d.get("TotalAmount") is not None]
+        avg_amount = sum(amounts) / len(amounts) if amounts else None
+
+        raw_due = latest.get("DueDate")
+        due_date = _parse_datetime(raw_due) if raw_due else None
+
+        return {
+            "latest_invoice_amount": latest.get("TotalAmount"),
+            "latest_invoice_period": latest.get("Period"),
+            "latest_invoice_due_date": due_date,
+            "latest_invoice_status": latest.get("Status"),
+            "pending_invoice_amount": pending,
+            "avg_invoice_amount": round(avg_amount, 2) if avg_amount is not None else None,
+            "water_price_per_m3": self._water_price(avg_amount),
+        }
+
+    def _water_price(self, avg_amount: float | None) -> float | None:
+        if not avg_amount or not self.avg_daily_liters or self.avg_daily_liters <= 0:
+            return None
+        billing_days = self._billing_period_days()
+        m3 = self.avg_daily_liters * billing_days / 1000
+        if m3 <= 0:
+            return None
+        return round(avg_amount / m3, 4)
+
+    def _billing_period_days(self) -> int:
+        """Estimate billing period length from gaps between invoice dates."""
+        dates = [
+            _parse_datetime(d.get("IssueDate", ""))
+            for d in self.documents
+            if d.get("IssueDate")
+        ]
+        if len(dates) < 2:
+            return self._TYPICAL_BILLING_DAYS
+        gaps = [(dates[i] - dates[i + 1]).days for i in range(len(dates) - 1)]
+        return round(sum(gaps) / len(gaps)) or self._TYPICAL_BILLING_DAYS
 
 
 def _parse_datetime(value: Any) -> datetime:

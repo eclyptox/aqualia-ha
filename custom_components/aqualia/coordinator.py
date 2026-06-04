@@ -12,17 +12,22 @@ from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ConfigEntryAuthFailed
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .api import AqualiaApiError, AqualiaAuthError, AqualiaClient
+from .api import AqualiaApiError, AqualiaAuthError, AqualiaClient, InvoiceParser
 from .const import (
     CONF_CAC_CODE,
     CONF_CONTRACT_CODE,
     CONF_CONTRACT_NUMBER,
+    CONF_CONTRACT_STATUS,
+    CONF_CONTRACT_STATUS_CODE,
     CONF_DAYS_BACK,
+    CONF_ENTRY_DATE,
     CONF_INSTALLATION_CODE,
+    CONF_MUNICIPALITY_CODE,
     CONF_POLL_INTERVAL_MINUTES,
     DEFAULT_DAYS_BACK,
     DEFAULT_UPDATE_INTERVAL,
     DOMAIN,
+    INVOICE_FETCH_INTERVAL,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -41,6 +46,8 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.client = client
         self.last_error: str | None = None
         self.last_success_time: datetime | None = None
+        self._cached_invoice_data: dict[str, Any] = {}
+        self._last_invoice_fetch: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -56,7 +63,7 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         data = self.entry.data
         try:
-            result = await self.hass.async_add_executor_job(
+            consumption = await self.hass.async_add_executor_job(
                 partial(
                     self.client.fetch_metrics,
                     days_back=data.get(CONF_DAYS_BACK, DEFAULT_DAYS_BACK),
@@ -68,7 +75,6 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             )
             self.last_error = None
             self.last_success_time = datetime.now(UTC)
-            return result
         except AqualiaAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except AqualiaApiError as err:
@@ -77,3 +83,38 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         except Exception as err:
             self.last_error = str(err)
             raise UpdateFailed(f"Error actualizando Aqualia: {err}") from err
+
+        if self._should_fetch_invoices():
+            await self._refresh_invoice_cache(consumption.get("avg_daily_30d"))
+
+        return {**consumption, **self._cached_invoice_data}
+
+    def _should_fetch_invoices(self) -> bool:
+        if self._last_invoice_fetch is None:
+            return True
+        return datetime.now(UTC) - self._last_invoice_fetch > INVOICE_FETCH_INTERVAL
+
+    async def _refresh_invoice_cache(self, avg_daily_30d: float | None) -> None:
+        data = self.entry.data
+        end = datetime.now(UTC)
+        start = end - timedelta(days=730)
+        try:
+            documents = await self.hass.async_add_executor_job(
+                partial(
+                    self.client.get_invoices,
+                    start_date=start,
+                    end_date=end,
+                    cac_code=data[CONF_CAC_CODE],
+                    contract_code=data[CONF_CONTRACT_CODE],
+                    installation_code=data[CONF_INSTALLATION_CODE],
+                    contract_number=data[CONF_CONTRACT_NUMBER],
+                    municipality_code=data.get(CONF_MUNICIPALITY_CODE, ""),
+                    entry_date=data.get(CONF_ENTRY_DATE, ""),
+                    contract_status_code=data.get(CONF_CONTRACT_STATUS_CODE, 0),
+                    contract_status=data.get(CONF_CONTRACT_STATUS, ""),
+                )
+            )
+            self._cached_invoice_data = InvoiceParser(documents, avg_daily_30d).parse()
+            self._last_invoice_fetch = datetime.now(UTC)
+        except Exception as err:
+            _LOGGER.warning("Aqualia invoice fetch failed, using cached data: %s", err)

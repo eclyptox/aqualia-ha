@@ -9,8 +9,9 @@ _T = TypeVar("_T")
 
 
 class SensorDeviceClass(StrEnum):
-    WATER = "water"
+    MONETARY = "monetary"
     TIMESTAMP = "timestamp"
+    WATER = "water"
 
 
 class SensorStateClass(StrEnum):

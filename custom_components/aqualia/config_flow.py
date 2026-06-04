@@ -16,8 +16,12 @@ from .const import (
     CONF_CAC_CODE,
     CONF_CONTRACT_CODE,
     CONF_CONTRACT_NUMBER,
+    CONF_CONTRACT_STATUS,
+    CONF_CONTRACT_STATUS_CODE,
     CONF_DAYS_BACK,
+    CONF_ENTRY_DATE,
     CONF_INSTALLATION_CODE,
+    CONF_MUNICIPALITY_CODE,
     CONF_NIF,
     CONF_POLL_INTERVAL_MINUTES,
     DEFAULT_DAYS_BACK,
@@ -117,6 +121,11 @@ class AqualiaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                         CONF_CONTRACT_CODE: int(contract.get("ContractCode", 0)),
                         CONF_INSTALLATION_CODE: int(contract.get("InstallationCode", 0)),
                         CONF_CONTRACT_NUMBER: selected_number,
+                        # Full ContractIdentifier fields required by the invoice API
+                        CONF_MUNICIPALITY_CODE: str(contract.get("MunicipalityCode", "")),
+                        CONF_ENTRY_DATE: str(contract.get("EntryDate", "")),
+                        CONF_CONTRACT_STATUS_CODE: int(contract.get("ContractStatusCode", 0)),
+                        CONF_CONTRACT_STATUS: str(contract.get("ContractStatus", "")),
                         CONF_POLL_INTERVAL_MINUTES: user_input.get(
                             CONF_POLL_INTERVAL_MINUTES, DEFAULT_POLL_INTERVAL_MINUTES
                         ),

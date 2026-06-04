@@ -38,6 +38,10 @@ class AqualiaSensorDescription:
     value_fn: Callable[[Any], Any] | None = None
     # If True, sensor goes unavailable when data is stale (>_STALE_DAYS days old)
     stale_unavailable: bool = False
+    # If True, sensor is unavailable when its specific key is None in coordinator data
+    requires_data: bool = False
+    # Extra keys from coordinator.data to include in extra_state_attributes
+    extra_attrs_keys: tuple[str, ...] = ()
 
 
 SENSORS: tuple[AqualiaSensorDescription, ...] = (
@@ -119,6 +123,57 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
 )
 
 
+INVOICE_SENSORS: tuple[AqualiaSensorDescription, ...] = (
+    AqualiaSensorDescription(
+        key="latest_invoice_amount",
+        name="Latest Invoice Amount (Aqualia)",
+        native_unit_of_measurement="€",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:receipt",
+        value_fn=lambda v: round(v, 2) if v is not None else None,
+        requires_data=True,
+        extra_attrs_keys=("latest_invoice_period", "latest_invoice_status"),
+    ),
+    AqualiaSensorDescription(
+        key="latest_invoice_due_date",
+        name="Latest Invoice Due Date (Aqualia)",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        icon="mdi:calendar-clock",
+        requires_data=True,
+    ),
+    AqualiaSensorDescription(
+        key="pending_invoice_amount",
+        name="Pending Invoice Amount (Aqualia)",
+        native_unit_of_measurement="€",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:cash-clock",
+        value_fn=lambda v: round(v, 2) if v is not None else None,
+        requires_data=True,
+    ),
+    AqualiaSensorDescription(
+        key="avg_invoice_amount",
+        name="Average Invoice Amount (Aqualia)",
+        native_unit_of_measurement="€",
+        device_class=SensorDeviceClass.MONETARY,
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:cash-multiple",
+        value_fn=lambda v: round(v, 2) if v is not None else None,
+        requires_data=True,
+    ),
+    AqualiaSensorDescription(
+        key="water_price_per_m3",
+        name="Estimated Water Price (Aqualia)",
+        native_unit_of_measurement="€/m³",
+        state_class=SensorStateClass.MEASUREMENT,
+        icon="mdi:currency-eur",
+        value_fn=lambda v: round(v, 4) if v is not None else None,
+        requires_data=True,
+    ),
+)
+
+
 def _device_info(entry: ConfigEntry) -> dict:
     return {
         "identifiers": {(DOMAIN, entry.entry_id)},
@@ -138,6 +193,9 @@ async def async_setup_entry(
     entities: list[SensorEntity] = [
         AqualiaSensor(coordinator, entry, description) for description in SENSORS
     ]
+    entities.extend(
+        AqualiaSensor(coordinator, entry, description) for description in INVOICE_SENSORS
+    )
     entities.append(AqualiaCumulativeSensor(coordinator, entry))
     async_add_entities(entities)
 
@@ -188,6 +246,9 @@ class AqualiaSensor(
                 return False
             if (datetime.now(UTC) - last_date).days > _STALE_DAYS:
                 return False
+        if self.entity_description.requires_data:
+            if self.coordinator.data.get(self.entity_description.key) is None:
+                return False
         return True
 
     @property
@@ -203,10 +264,18 @@ class AqualiaSensor(
     def extra_state_attributes(self) -> dict[str, Any]:
         if self.coordinator.data is None:
             return {}
-        days = self.coordinator.data.get("days_since_reading")
-        if days is None:
-            return {}
-        return {"days_since_reading": days}
+        attrs: dict[str, Any] = {}
+        # Consumption staleness — only meaningful for non-invoice sensors
+        if not self.entity_description.requires_data:
+            days = self.coordinator.data.get("days_since_reading")
+            if days is not None:
+                attrs["days_since_reading"] = days
+        # Extra keys declared in the sensor description
+        for key in self.entity_description.extra_attrs_keys:
+            val = self.coordinator.data.get(key)
+            if val is not None:
+                attrs[key] = val.isoformat() if hasattr(val, "isoformat") else val
+        return attrs
 
 
 class AqualiaCumulativeSensor(
