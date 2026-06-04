@@ -27,24 +27,40 @@ _STALE_DAYS = 7
 
 @dataclass(frozen=True)
 class AqualiaSensorDescription:
-    """Describes an Aqualia sensor."""
+    """Describes an Aqualia sensor.
 
+    Mirrors the fields HA reads from entity_description (EntityDescription +
+    SensorEntityDescription) so that newer HA versions never hit AttributeError
+    when accessing any expected field.  Custom fields come last.
+    """
+
+    # ── EntityDescription fields ──────────────────────────────────────────────
     key: str
-    name: str
-    native_unit_of_measurement: str | None = None
-    device_class: SensorDeviceClass | None = None
-    state_class: SensorStateClass | None = None
+    name: str | None = None
     icon: str | None = None
-    value_fn: Callable[[Any], Any] | None = None
-    # If True, sensor goes unavailable when data is stale (>_STALE_DAYS days old)
-    stale_unavailable: bool = False
-    # If True, sensor is unavailable when its specific key is None in coordinator data
-    requires_data: bool = False
-    # Extra keys from coordinator.data to include in extra_state_attributes
-    extra_attrs_keys: tuple[str, ...] = ()
-    # Required by HA ≥2024.x: entity_description must expose these two fields
+    device_class: SensorDeviceClass | None = None
+    entity_category: str | None = None
     entity_registry_enabled_default: bool = True
     entity_registry_visible_default: bool = True
+    force_update: bool = False
+    has_entity_name: bool = False
+    translation_key: str | None = None
+    translation_placeholders: dict | None = None
+    unit_of_measurement: str | None = None
+
+    # ── SensorEntityDescription fields ───────────────────────────────────────
+    native_unit_of_measurement: str | None = None
+    state_class: SensorStateClass | None = None
+    last_reset: datetime | None = None
+    options: tuple | None = None
+    suggested_display_precision: int | None = None
+    suggested_unit_of_measurement: str | None = None
+
+    # ── Custom Aqualia fields ─────────────────────────────────────────────────
+    value_fn: Callable[[Any], Any] | None = None
+    stale_unavailable: bool = False
+    requires_data: bool = False
+    extra_attrs_keys: tuple[str, ...] = ()
 
 
 SENSORS: tuple[AqualiaSensorDescription, ...] = (
