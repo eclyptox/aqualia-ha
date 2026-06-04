@@ -42,6 +42,9 @@ class AqualiaSensorDescription:
     requires_data: bool = False
     # Extra keys from coordinator.data to include in extra_state_attributes
     extra_attrs_keys: tuple[str, ...] = ()
+    # Required by HA ≥2024.x: entity_description must expose these two fields
+    entity_registry_enabled_default: bool = True
+    entity_registry_visible_default: bool = True
 
 
 SENSORS: tuple[AqualiaSensorDescription, ...] = (
