@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from functools import partial
 import logging
 from typing import Any
@@ -39,6 +39,8 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     ) -> None:
         self.entry = entry
         self.client = client
+        self.last_error: str | None = None
+        self.last_success_time: datetime | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -54,7 +56,7 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     async def _async_update_data(self) -> dict[str, Any]:
         data = self.entry.data
         try:
-            return await self.hass.async_add_executor_job(
+            result = await self.hass.async_add_executor_job(
                 partial(
                     self.client.fetch_metrics,
                     days_back=data.get(CONF_DAYS_BACK, DEFAULT_DAYS_BACK),
@@ -64,9 +66,14 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     contract_number=data[CONF_CONTRACT_NUMBER],
                 )
             )
+            self.last_error = None
+            self.last_success_time = datetime.now(UTC)
+            return result
         except AqualiaAuthError as err:
             raise ConfigEntryAuthFailed(str(err)) from err
         except AqualiaApiError as err:
+            self.last_error = str(err)
             raise UpdateFailed(str(err)) from err
         except Exception as err:
+            self.last_error = str(err)
             raise UpdateFailed(f"Error actualizando Aqualia: {err}") from err

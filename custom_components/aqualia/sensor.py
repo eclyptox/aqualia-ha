@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from homeassistant.components.sensor import (
@@ -179,11 +180,13 @@ class AqualiaSensor(
 
     @property
     def available(self) -> bool:
-        if not super().available:
+        if self.coordinator.data is None:
             return False
         if self.entity_description.stale_unavailable:
-            days = self.coordinator.data.get("days_since_reading") if self.coordinator.data else None
-            if days is None or days > _STALE_DAYS:
+            last_date = self.coordinator.data.get("last_reading_date")
+            if last_date is None:
+                return False
+            if (datetime.now(UTC) - last_date).days > _STALE_DAYS:
                 return False
         return True
 
@@ -233,6 +236,10 @@ class AqualiaCumulativeSensor(
         self._attr_device_info = _device_info(entry)
 
     @property
+    def available(self) -> bool:
+        return self.coordinator.data is not None
+
+    @property
     def native_value(self) -> float | None:
         if self.coordinator.data is None:
             return None
@@ -244,11 +251,14 @@ class AqualiaCumulativeSensor(
         if self.coordinator.data is None:
             return {}
         attrs: dict[str, Any] = {}
-        days = self.coordinator.data.get("days_since_reading")
-        if days is not None:
-            attrs["days_since_reading"] = days
-            attrs["data_delayed"] = days > 0
         last_date = self.coordinator.data.get("last_reading_date")
         if last_date is not None:
             attrs["last_reading_date"] = last_date.isoformat()
+            days_since = (datetime.now(UTC) - last_date).days
+            attrs["days_since_reading"] = days_since
+            attrs["data_delayed"] = days_since > 0
+        if self.coordinator.last_success_time is not None:
+            attrs["last_update_success"] = self.coordinator.last_success_time.isoformat()
+        if self.coordinator.last_error:
+            attrs["api_error"] = self.coordinator.last_error
         return attrs

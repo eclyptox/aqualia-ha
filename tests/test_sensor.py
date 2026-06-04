@@ -9,10 +9,17 @@ import pytest
 from aqualia.sensor import AqualiaSensor, AqualiaCumulativeSensor, SENSORS, _STALE_DAYS
 
 
-def _make_coordinator(data: dict | None, last_update_success: bool = True) -> MagicMock:
+def _make_coordinator(
+    data: dict | None,
+    last_update_success: bool = True,
+    last_error: str | None = None,
+    last_success_time: datetime | None = None,
+) -> MagicMock:
     coord = MagicMock()
     coord.data = data
     coord.last_update_success = last_update_success
+    coord.last_error = last_error
+    coord.last_success_time = last_success_time
     return coord
 
 
@@ -22,14 +29,22 @@ def _make_entry() -> MagicMock:
     return entry
 
 
-def _make_sensor(key: str, data: dict | None, last_update_success: bool = True) -> AqualiaSensor:
+def _make_sensor(
+    key: str,
+    data: dict | None,
+    last_update_success: bool = True,
+    last_error: str | None = None,
+) -> AqualiaSensor:
     description = next(d for d in SENSORS if d.key == key)
-    coord = _make_coordinator(data, last_update_success)
+    coord = _make_coordinator(data, last_update_success, last_error=last_error)
     entry = _make_entry()
     sensor = AqualiaSensor(coord, entry, description)
-    # Patch CoordinatorEntity.available to use our mock
     type(sensor).coordinator = PropertyMock(return_value=coord)
     return sensor
+
+
+def _recent_date(days_ago: int = 1) -> datetime:
+    return datetime.now(UTC) - timedelta(days=days_ago)
 
 
 # ── native_value ─────────────────────────────────────────────────────────────
@@ -54,7 +69,8 @@ class TestNativeValue:
 
     def test_today_consumption_value(self):
         sensor = _make_sensor("today_consumption",
-                               {"today_consumption": 88.8, "days_since_reading": 0})
+                               {"today_consumption": 88.8, "days_since_reading": 0,
+                                "last_reading_date": _recent_date(0)})
         assert sensor.native_value == pytest.approx(88.8)
 
 
@@ -69,10 +85,15 @@ class TestAvailability:
             "monthly_total": 2000.0,
             "ratio_vs_avg": 100.0,
             "days_since_reading": _STALE_DAYS + 1,
+            "last_reading_date": _recent_date(_STALE_DAYS + 1),
         }
 
     def _fresh_data(self) -> dict:
-        return {**self._stale_data(), "days_since_reading": 1}
+        return {
+            **self._stale_data(),
+            "days_since_reading": 1,
+            "last_reading_date": _recent_date(1),
+        }
 
     def test_stale_unavailable_sensor_is_unavailable_when_stale(self):
         sensor = _make_sensor("daily_normalized", self._stale_data())
@@ -83,21 +104,24 @@ class TestAvailability:
         assert sensor.available is True
 
     def test_non_stale_sensor_available_regardless_of_days(self):
-        # days_since_reading sensor itself should never go unavailable due to staleness
         sensor = _make_sensor("days_since_reading", self._stale_data())
         assert sensor.available is True
 
-    def test_last_value_always_available_when_fresh_data(self):
+    def test_last_value_always_available_when_has_data(self):
         sensor = _make_sensor("last_value", self._stale_data())
-        # last_value has stale_unavailable=False
         assert sensor.available is True
 
-    def test_unavailable_when_coordinator_failed(self):
+    def test_available_even_when_api_fails_but_has_data(self):
+        # API failure should NOT make sensors unavailable if we have cached data
         sensor = _make_sensor("daily_normalized", self._fresh_data(), last_update_success=False)
+        assert sensor.available is True
+
+    def test_unavailable_when_no_data_at_all(self):
+        sensor = _make_sensor("daily_normalized", None)
         assert sensor.available is False
 
-    def test_unavailable_when_days_since_reading_is_none(self):
-        data = {**self._fresh_data(), "days_since_reading": None}
+    def test_unavailable_when_last_reading_date_is_none(self):
+        data = {**self._fresh_data(), "last_reading_date": None}
         sensor = _make_sensor("daily_normalized", data)
         assert sensor.available is False
 
@@ -108,6 +132,10 @@ class TestAvailability:
     def test_monthly_total_unavailable_when_stale(self):
         sensor = _make_sensor("monthly_total", self._stale_data())
         assert sensor.available is False
+
+    def test_non_stale_sensor_available_even_after_api_failure(self):
+        sensor = _make_sensor("last_value", self._stale_data(), last_update_success=False)
+        assert sensor.available is True
 
 
 # ── extra_state_attributes ────────────────────────────────────────────────────
@@ -130,8 +158,16 @@ class TestExtraAttributes:
 # ── AqualiaCumulativeSensor ───────────────────────────────────────────────────
 
 class TestCumulativeSensor:
-    def _make(self, data: dict | None, success: bool = True) -> AqualiaCumulativeSensor:
-        coord = _make_coordinator(data, success)
+    def _make(
+        self,
+        data: dict | None,
+        success: bool = True,
+        last_error: str | None = None,
+        last_success_time: datetime | None = None,
+    ) -> AqualiaCumulativeSensor:
+        coord = _make_coordinator(
+            data, success, last_error=last_error, last_success_time=last_success_time
+        )
         entry = _make_entry()
         sensor = AqualiaCumulativeSensor(coord, entry)
         type(sensor).coordinator = PropertyMock(return_value=coord)
@@ -149,22 +185,68 @@ class TestCumulativeSensor:
         sensor = self._make({"days_since_reading": 1})
         assert sensor.native_value is None
 
+    def test_available_when_has_data(self):
+        sensor = self._make({"reading_index": 5000.0, "last_reading_date": _recent_date(1)})
+        assert sensor.available is True
+
+    def test_available_even_when_api_fails(self):
+        # Energy Dashboard sensor must stay available even if API is down
+        sensor = self._make({"reading_index": 5000.0}, success=False)
+        assert sensor.available is True
+
+    def test_unavailable_only_when_no_data(self):
+        sensor = self._make(None)
+        assert sensor.available is False
+
     def test_attributes_include_delay_flag(self):
-        sensor = self._make({"reading_index": 5000.0, "days_since_reading": 3,
-                              "last_reading_date": datetime(2026, 5, 1, tzinfo=UTC)})
+        last_date = _recent_date(3)
+        sensor = self._make({"reading_index": 5000.0, "last_reading_date": last_date})
         attrs = sensor.extra_state_attributes
-        assert attrs["days_since_reading"] == 3
+        assert attrs["days_since_reading"] > 0
         assert attrs["data_delayed"] is True
 
     def test_attributes_delay_false_when_reading_today(self):
-        sensor = self._make({"reading_index": 5000.0, "days_since_reading": 0,
-                              "last_reading_date": datetime.now(UTC)})
+        sensor = self._make({"reading_index": 5000.0, "last_reading_date": datetime.now(UTC)})
         attrs = sensor.extra_state_attributes
         assert attrs["data_delayed"] is False
 
     def test_attributes_empty_when_no_data(self):
         sensor = self._make(None)
         assert sensor.extra_state_attributes == {}
+
+    def test_attributes_include_last_update_success(self):
+        ts = datetime(2026, 6, 4, 8, 0, 0, tzinfo=UTC)
+        sensor = self._make(
+            {"reading_index": 5000.0, "last_reading_date": _recent_date(1)},
+            last_success_time=ts,
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["last_update_success"] == ts.isoformat()
+
+    def test_attributes_include_api_error_when_present(self):
+        sensor = self._make(
+            {"reading_index": 5000.0, "last_reading_date": _recent_date(1)},
+            last_error="Connection timeout",
+        )
+        attrs = sensor.extra_state_attributes
+        assert attrs["api_error"] == "Connection timeout"
+
+    def test_attributes_no_api_error_when_none(self):
+        sensor = self._make(
+            {"reading_index": 5000.0, "last_reading_date": _recent_date(1)},
+            last_error=None,
+        )
+        attrs = sensor.extra_state_attributes
+        assert "api_error" not in attrs
+
+    def test_attributes_days_since_reading_computed_dynamically(self):
+        # days_since_reading is computed from last_reading_date at call time,
+        # not from cached coordinator data — stays accurate even during API outages
+        last_date = _recent_date(5)
+        sensor = self._make({"reading_index": 5000.0, "last_reading_date": last_date,
+                              "days_since_reading": 999})  # stale cached value
+        attrs = sensor.extra_state_attributes
+        assert 4 <= attrs["days_since_reading"] <= 6  # dynamically computed, ~5
 
 
 # ── sensor descriptions ───────────────────────────────────────────────────────
