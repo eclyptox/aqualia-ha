@@ -1,12 +1,12 @@
 """Tests for AqualiaDataUpdateCoordinator logic."""
 
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, call
 
 import pytest
 
 from aqualia.coordinator import AqualiaDataUpdateCoordinator
-from aqualia.const import CONF_CONTRACT_NUMBER
+from aqualia.const import CONF_CONTRACT_NUMBER, DOMAIN
 
 
 # ── _should_fetch_invoices ────────────────────────────────────────────────────
@@ -133,3 +133,130 @@ class TestResolveContractIdentifier:
 
         assert status_code == 0
         assert isinstance(status_code, int)
+
+
+# ── _notify_new_invoice ───────────────────────────────────────────────────────
+
+def _make_notify_coord() -> MagicMock:
+    coord = MagicMock()
+    coord.hass.bus.async_fire = MagicMock()
+    coord.hass.services.async_call = AsyncMock()
+    return coord
+
+
+class TestNotifyNewInvoice:
+    @pytest.mark.asyncio
+    async def test_fires_domain_event(self):
+        coord = _make_notify_coord()
+        await AqualiaDataUpdateCoordinator._notify_new_invoice(
+            coord, {"latest_invoice_amount": 52.18}, "Mar-Abr / 2026"
+        )
+        coord.hass.bus.async_fire.assert_called_once()
+        event_name, payload = coord.hass.bus.async_fire.call_args[0]
+        assert event_name == f"{DOMAIN}_new_invoice"
+        assert payload["period"] == "Mar-Abr / 2026"
+        assert payload["amount"] == 52.18
+
+    @pytest.mark.asyncio
+    async def test_creates_persistent_notification(self):
+        coord = _make_notify_coord()
+        await AqualiaDataUpdateCoordinator._notify_new_invoice(
+            coord, {"latest_invoice_amount": 40.0}, "Ene-Feb / 2026"
+        )
+        coord.hass.services.async_call.assert_awaited_once()
+        _, service, data = coord.hass.services.async_call.call_args[0]
+        assert service == "create"
+        assert f"{DOMAIN}_new_invoice" == data["notification_id"]
+        assert "40.00 €" in data["message"]
+        assert "Ene-Feb / 2026" in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_event_excludes_none_amount(self):
+        coord = _make_notify_coord()
+        await AqualiaDataUpdateCoordinator._notify_new_invoice(
+            coord, {}, "May-Jun / 2026"
+        )
+        _, payload = coord.hass.bus.async_fire.call_args[0]
+        assert "amount" not in payload
+
+    @pytest.mark.asyncio
+    async def test_event_includes_due_date_iso(self):
+        coord = _make_notify_coord()
+        due = datetime(2026, 5, 15, tzinfo=UTC)
+        await AqualiaDataUpdateCoordinator._notify_new_invoice(
+            coord, {"latest_invoice_amount": 38.5, "latest_invoice_due_date": due},
+            "Mar-Abr / 2026",
+        )
+        _, payload = coord.hass.bus.async_fire.call_args[0]
+        assert payload["due_date"] == due.isoformat()
+
+
+# ── period change detection in _refresh_invoice_cache ────────────────────────
+
+def _make_refresh_coord(
+    last_period: str | None,
+    new_period: str,
+    amount: float = 55.0,
+) -> MagicMock:
+    """Coordinator stub wired for _refresh_invoice_cache tests."""
+    from aqualia.const import (
+        CONF_CAC_CODE, CONF_CONTRACT_CODE, CONF_INSTALLATION_CODE,
+        CONF_MUNICIPALITY_CODE, CONF_ENTRY_DATE, CONF_CONTRACT_STATUS_CODE,
+        CONF_CONTRACT_STATUS,
+    )
+    coord = MagicMock()
+    coord._last_known_invoice_period = last_period
+    coord._last_invoice_fetch = None
+    coord._cached_invoice_data = {}
+    coord.entry.data = {
+        CONF_CAC_CODE: "CAC1",
+        CONF_CONTRACT_CODE: "CC1",
+        CONF_INSTALLATION_CODE: "IC1",
+        CONF_CONTRACT_NUMBER: "300-1/1-000001",
+        CONF_MUNICIPALITY_CODE: "3063000100",
+        CONF_ENTRY_DATE: "01/01/2020",
+        CONF_CONTRACT_STATUS_CODE: 3,
+        CONF_CONTRACT_STATUS: "Alta definitiva",
+    }
+    # Simulate get_invoices returning minimal doc list → InvoiceParser returns new_period
+    coord.hass.async_add_executor_job = AsyncMock(return_value=[
+        {
+            "IssueDate": "2026-04-01T00:00:00",
+            "DueDate": "2026-05-01T00:00:00",
+            "TotalAmount": amount,
+            "Status": "Pagado",
+            "Period": new_period,
+            "HasDebt": False,
+        }
+    ])
+    coord.hass.bus.async_fire = MagicMock()
+    coord.hass.services.async_call = AsyncMock()
+    coord._notify_new_invoice = AsyncMock()
+    return coord
+
+
+class TestRefreshInvoicePeriodDetection:
+    @pytest.mark.asyncio
+    async def test_notifies_when_period_changes(self):
+        coord = _make_refresh_coord(last_period="Ene-Feb / 2026", new_period="Mar-Abr / 2026")
+        await AqualiaDataUpdateCoordinator._refresh_invoice_cache(coord, avg_daily_30d=None)
+        coord._notify_new_invoice.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_notification_on_first_load(self):
+        coord = _make_refresh_coord(last_period=None, new_period="Mar-Abr / 2026")
+        await AqualiaDataUpdateCoordinator._refresh_invoice_cache(coord, avg_daily_30d=None)
+        coord._notify_new_invoice.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_notification_when_period_unchanged(self):
+        coord = _make_refresh_coord(last_period="Mar-Abr / 2026", new_period="Mar-Abr / 2026")
+        await AqualiaDataUpdateCoordinator._refresh_invoice_cache(coord, avg_daily_30d=None)
+        coord._notify_new_invoice.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_updates_known_period_after_fetch(self):
+        coord = _make_refresh_coord(last_period=None, new_period="Mar-Abr / 2026")
+        await AqualiaDataUpdateCoordinator._refresh_invoice_cache(coord, avg_daily_30d=None)
+        # After first load, _last_known_invoice_period should be set
+        assert coord._last_known_invoice_period == "Mar-Abr / 2026"

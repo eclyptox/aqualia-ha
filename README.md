@@ -2,7 +2,7 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?logo=homeassistantcommunitystore&logoColor=white)](https://github.com/hacs/integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
-[![Tests](https://img.shields.io/badge/tests-144%20passed-brightgreen?logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/tests-152%20passed-brightgreen?logo=pytest&logoColor=white)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Integración personalizada para Home Assistant que consulta el consumo de agua de Aqualia y crea sensores nativos, incluyendo consumo acumulado, datos de facturación y precio estimado del agua compatibles con el **Energy Dashboard**.
@@ -109,6 +109,41 @@ Para que el Energy Dashboard muestre el gasto en €:
 3. Elige `sensor.aqualia_water_meter_estimated_water_price_aqualia`.
 
 HA multiplicará automáticamente el consumo por el precio estimado y mostrará el coste acumulado en €.
+
+## Notificaciones de nueva factura
+
+Cuando la integración detecta que ha llegado una factura nueva (el período cambia respecto al último conocido), hace dos cosas automáticamente:
+
+1. **Notificación persistente en HA**: Aparece en el panel de notificaciones (icono campana) con el período, importe y fecha de vencimiento.
+
+2. **Evento de Home Assistant `aqualia_new_invoice`**: Puedes usarlo en automatizaciones para recibir la notificación donde quieras (móvil, Telegram, etc.).
+
+**Payload del evento:**
+
+| Campo | Tipo | Ejemplo |
+| --- | --- | --- |
+| `period` | string | `"Mar-Abr / 2026"` |
+| `amount` | float | `52.18` |
+| `due_date` | ISO 8601 | `"2026-05-01T00:00:00+00:00"` |
+
+**Ejemplo de automatización (notificación móvil):**
+
+```yaml
+automation:
+  alias: "Aviso nueva factura Aqualia"
+  trigger:
+    platform: event
+    event_type: aqualia_new_invoice
+  action:
+    service: notify.mobile_app_tu_telefono
+    data:
+      title: "💧 Nueva factura Aqualia"
+      message: >
+        Período: {{ trigger.event.data.period }}
+        Importe: {{ trigger.event.data.amount }} €
+```
+
+> **Nota:** La detección se hace cada 12 horas (intervalo de refresco de facturas). No se genera notificación en el primer arranque, solo cuando se detecta un cambio real de período.
 
 ## Notas técnicas
 

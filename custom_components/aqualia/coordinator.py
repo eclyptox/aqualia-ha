@@ -48,6 +48,7 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.last_success_time: datetime | None = None
         self._cached_invoice_data: dict[str, Any] = {}
         self._last_invoice_fetch: datetime | None = None
+        self._last_known_invoice_period: str | None = None
         super().__init__(
             hass,
             _LOGGER,
@@ -128,10 +129,50 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     contract_status=contract_status,
                 )
             )
-            self._cached_invoice_data = InvoiceParser(documents, avg_daily_30d).parse()
+            parsed = InvoiceParser(documents, avg_daily_30d).parse()
+            new_period = parsed.get("latest_invoice_period")
+            if (
+                self._last_known_invoice_period is not None
+                and new_period is not None
+                and new_period != self._last_known_invoice_period
+            ):
+                await self._notify_new_invoice(parsed, new_period)
+            if new_period is not None:
+                self._last_known_invoice_period = new_period
+            self._cached_invoice_data = parsed
             self._last_invoice_fetch = datetime.now(UTC)
         except Exception as err:
             _LOGGER.warning("Aqualia invoice fetch failed, using cached data: %s", err)
+
+    async def _notify_new_invoice(self, invoice_data: dict[str, Any], period: str) -> None:
+        """Fire an HA event and create a persistent notification for a new invoice."""
+        amount = invoice_data.get("latest_invoice_amount")
+        due_date = invoice_data.get("latest_invoice_due_date")
+
+        event_payload: dict[str, Any] = {"period": period}
+        if amount is not None:
+            event_payload["amount"] = amount
+        if due_date is not None:
+            event_payload["due_date"] = due_date.isoformat()
+
+        self.hass.bus.async_fire(f"{DOMAIN}_new_invoice", event_payload)
+
+        lines = [f"Período: **{period}**"]
+        if amount is not None:
+            lines.append(f"Importe: {amount:.2f} €")
+        if due_date is not None:
+            lines.append(f"Vencimiento: {due_date.strftime('%d/%m/%Y')}")
+
+        await self.hass.services.async_call(
+            "persistent_notification",
+            "create",
+            {
+                "message": "\n".join(lines),
+                "title": "Aqualia: nueva factura",
+                "notification_id": f"{DOMAIN}_new_invoice",
+            },
+        )
+        _LOGGER.info("Nueva factura Aqualia detectada: %s (%.2f €)", period, amount or 0)
 
     async def _resolve_contract_identifier(self) -> tuple[str, str, int, str]:
         """Fetch ContractIdentifier fields from GetUserLinkedContracts.
