@@ -331,7 +331,9 @@ class AqualiaCumulativeSensor(
         if self.coordinator.data is None:
             return None
         value = self.coordinator.data.get("reading_index")
-        return round(value, 1) if value is not None else None
+        # Never emit 0: a transient 0 from the API would be counted as new
+        # consumption by total_increasing when the real value returns.
+        return round(value, 1) if value else None
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:

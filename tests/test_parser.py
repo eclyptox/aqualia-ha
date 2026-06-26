@@ -36,6 +36,21 @@ class TestLastValue:
         assert metrics["last_value"] == 120.0
         assert metrics["reading_index"] == 2000.0
 
+    def test_reading_index_zero_returns_none(self):
+        """API returning ReadingIndex=0 must not emit 0 (avoids total_increasing spike)."""
+        from tests.conftest import make_reading
+        from datetime import datetime, UTC
+        readings = [make_reading(datetime.now(UTC), 100.0, 0.0)]
+        metrics = ConsumptionParser(readings).parse()
+        assert metrics["reading_index"] is None
+
+    def test_reading_index_missing_returns_none(self):
+        """API omitting ReadingIndex must not emit 0."""
+        from datetime import datetime, UTC
+        reading = {"ReadingDate": datetime.now(UTC).isoformat(), "ReadingValue": 100.0}
+        metrics = ConsumptionParser([reading]).parse()
+        assert metrics["reading_index"] is None
+
 
 # ── reading_gap_days ─────────────────────────────────────────────────────────
 

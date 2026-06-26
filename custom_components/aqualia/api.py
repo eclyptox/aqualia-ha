@@ -389,8 +389,13 @@ class ConsumptionParser:
     def _last_value(self) -> float:
         return float(self.readings[-1].get(self._VALUE, 0))
 
-    def _reading_index(self) -> float:
-        return float(self.readings[-1].get(self._INDEX, 0))
+    def _reading_index(self) -> float | None:
+        val = self.readings[-1].get(self._INDEX)
+        # Return None when missing or zero so the cumulative sensor stays
+        # unavailable rather than emitting 0 — a transient 0 from the API
+        # would otherwise cause total_increasing to count the full meter
+        # value as new consumption when the real reading returns.
+        return float(val) if val else None
 
     def _last_reading_date(self) -> datetime:
         return _parse_datetime(self.readings[-1].get(self._DATE))
