@@ -1,0 +1,8 @@
+# Test-only dependencies. Home Assistant itself is not installed: tests/ha_stubs.py
+# provides the minimal HA surface. voluptuous IS required — it is what the config
+# flow schemas are built from, and stubbing it would test nothing.
+pytest>=7.4
+pytest-asyncio>=0.21
+pytest-cov>=4.1
+voluptuous>=0.13
+requests>=2.28

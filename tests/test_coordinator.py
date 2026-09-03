@@ -260,3 +260,94 @@ class TestRefreshInvoicePeriodDetection:
         await AqualiaDataUpdateCoordinator._refresh_invoice_cache(coord, avg_daily_30d=None)
         # After first load, _last_known_invoice_period should be set
         assert coord._last_known_invoice_period == "Mar-Abr / 2026"
+
+
+# ── _async_update_data ────────────────────────────────────────────────────────
+
+class TestAsyncUpdateData:
+    """The central refresh path: consumption always, invoices on a slower clock."""
+
+    def _coord(self, *, fetch_result=None, fetch_error=None, should_fetch_invoices=False):
+        from unittest.mock import AsyncMock
+
+        coord = MagicMock(spec=AqualiaDataUpdateCoordinator)
+        # `client` is set in __init__, so spec (built from the class) omits it
+        coord.client = MagicMock()
+        coord.entry = MagicMock()
+        coord.entry.data = {
+            "cac_code": 1,
+            "contract_code": 2,
+            "installation_code": 3,
+            "contract_number": "4",
+        }
+        coord.entry.options = {}
+        coord.last_error = "error previo"
+        coord.last_success_time = None
+        coord._cached_invoice_data = {"latest_invoice_amount": 42.0}
+        coord._should_fetch_invoices.return_value = should_fetch_invoices
+        coord._refresh_invoice_cache = AsyncMock()
+
+        async def _executor(func):
+            if fetch_error is not None:
+                raise fetch_error
+            return fetch_result or {"avg_daily_30d": 150.0}
+
+        coord.hass = MagicMock()
+        coord.hass.async_add_executor_job = _executor
+        return coord
+
+    @pytest.mark.asyncio
+    async def test_merges_consumption_with_cached_invoices(self):
+        coord = self._coord(fetch_result={"last_value": 100.0, "avg_daily_30d": 150.0})
+        result = await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        assert result["last_value"] == 100.0
+        assert result["latest_invoice_amount"] == 42.0
+
+    @pytest.mark.asyncio
+    async def test_clears_last_error_and_stamps_success(self):
+        coord = self._coord()
+        await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        assert coord.last_error is None
+        assert coord.last_success_time is not None
+
+    @pytest.mark.asyncio
+    async def test_auth_error_becomes_config_entry_auth_failed(self):
+        """Raising ConfigEntryAuthFailed is what triggers the reauth flow."""
+        from aqualia.api import AqualiaAuthError
+        from homeassistant.exceptions import ConfigEntryAuthFailed
+
+        coord = self._coord(fetch_error=AqualiaAuthError("credenciales"))
+        with pytest.raises(ConfigEntryAuthFailed):
+            await AqualiaDataUpdateCoordinator._async_update_data(coord)
+
+    @pytest.mark.asyncio
+    async def test_api_error_becomes_update_failed_and_records_error(self):
+        from aqualia.api import AqualiaApiError
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        coord = self._coord(fetch_error=AqualiaApiError("caída"))
+        with pytest.raises(UpdateFailed):
+            await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        assert coord.last_error == "caída"
+
+    @pytest.mark.asyncio
+    async def test_unexpected_error_becomes_update_failed(self):
+        from homeassistant.helpers.update_coordinator import UpdateFailed
+
+        coord = self._coord(fetch_error=ValueError("boom"))
+        with pytest.raises(UpdateFailed):
+            await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        assert coord.last_error == "boom"
+
+    @pytest.mark.asyncio
+    async def test_skips_invoice_refresh_when_not_due(self):
+        coord = self._coord(should_fetch_invoices=False)
+        await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        coord._refresh_invoice_cache.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_refreshes_invoices_with_avg_daily_when_due(self):
+        """avg_daily_30d feeds the €/m³ price calculation."""
+        coord = self._coord(should_fetch_invoices=True)
+        await AqualiaDataUpdateCoordinator._async_update_data(coord)
+        coord._refresh_invoice_cache.assert_awaited_once_with(150.0)

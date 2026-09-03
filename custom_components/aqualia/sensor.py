@@ -66,7 +66,8 @@ class AqualiaSensorDescription:
 SENSORS: tuple[AqualiaSensorDescription, ...] = (
     AqualiaSensorDescription(
         key="last_value",
-        name="Last Reading (Aqualia, may be delayed)",
+        name="Last reading",
+        translation_key="last_value",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:water",
@@ -74,7 +75,8 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="today_consumption",
-        name="Consumed Today (Aqualia)",
+        name="Consumed today",
+        translation_key="today_consumption",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.WATER,
         state_class=SensorStateClass.TOTAL,
@@ -84,7 +86,8 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="monthly_total",
-        name="Consumed This Month (Aqualia)",
+        name="Consumed this month",
+        translation_key="monthly_total",
         native_unit_of_measurement=UnitOfVolume.LITERS,
         device_class=SensorDeviceClass.WATER,
         state_class=SensorStateClass.TOTAL,
@@ -94,7 +97,8 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="daily_normalized",
-        name="Estimated Daily Consumption (Aqualia)",
+        name="Estimated daily consumption",
+        translation_key="daily_normalized",
         native_unit_of_measurement="L/d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:water-percent",
@@ -103,7 +107,8 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="avg_daily_30d",
-        name="30-Day Average Daily Consumption (Aqualia)",
+        name="30-day average",
+        translation_key="avg_daily_30d",
         native_unit_of_measurement="L/d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:chart-line",
@@ -111,7 +116,8 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="ratio_vs_avg",
-        name="Consumption vs 30-Day Average (Aqualia)",
+        name="Consumption vs 30-day average",
+        translation_key="ratio_vs_avg",
         native_unit_of_measurement=PERCENTAGE,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:percent",
@@ -120,21 +126,24 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="days_since_reading",
-        name="Days Since Last Aqualia Reading",
+        name="Days since last reading",
+        translation_key="days_since_reading",
         native_unit_of_measurement="d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:calendar-clock",
     ),
     AqualiaSensorDescription(
         key="reading_gap_days",
-        name="Last Reading Gap (Aqualia)",
+        name="Last reading gap",
+        translation_key="reading_gap_days",
         native_unit_of_measurement="d",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:calendar-range",
     ),
     AqualiaSensorDescription(
         key="last_reading_date",
-        name="Last Reading Date (Aqualia)",
+        name="Last reading date",
+        translation_key="last_reading_date",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:calendar-check",
     ),
@@ -144,8 +153,9 @@ SENSORS: tuple[AqualiaSensorDescription, ...] = (
 INVOICE_SENSORS: tuple[AqualiaSensorDescription, ...] = (
     AqualiaSensorDescription(
         key="latest_invoice_amount",
-        name="Latest Invoice Amount (Aqualia)",
-        native_unit_of_measurement="€",
+        name="Latest invoice amount",
+        translation_key="latest_invoice_amount",
+        native_unit_of_measurement="EUR",
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:receipt",
@@ -155,15 +165,17 @@ INVOICE_SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="latest_invoice_due_date",
-        name="Latest Invoice Due Date (Aqualia)",
+        name="Latest invoice due date",
+        translation_key="latest_invoice_due_date",
         device_class=SensorDeviceClass.TIMESTAMP,
         icon="mdi:calendar-clock",
         requires_data=True,
     ),
     AqualiaSensorDescription(
         key="pending_invoice_amount",
-        name="Pending Invoice Amount (Aqualia)",
-        native_unit_of_measurement="€",
+        name="Pending invoice amount",
+        translation_key="pending_invoice_amount",
+        native_unit_of_measurement="EUR",
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:cash-clock",
@@ -172,8 +184,9 @@ INVOICE_SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="avg_invoice_amount",
-        name="Average Invoice Amount (Aqualia)",
-        native_unit_of_measurement="€",
+        name="Average invoice amount",
+        translation_key="avg_invoice_amount",
+        native_unit_of_measurement="EUR",
         device_class=SensorDeviceClass.MONETARY,
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:cash-multiple",
@@ -182,8 +195,9 @@ INVOICE_SENSORS: tuple[AqualiaSensorDescription, ...] = (
     ),
     AqualiaSensorDescription(
         key="water_price_per_m3",
-        name="Estimated Water Price (Aqualia)",
-        native_unit_of_measurement="€/m³",
+        name="Estimated water price",
+        translation_key="water_price_per_m3",
+        native_unit_of_measurement="EUR/m³",
         state_class=SensorStateClass.MEASUREMENT,
         icon="mdi:currency-eur",
         value_fn=lambda v: round(v, 4) if v is not None else None,
@@ -235,7 +249,9 @@ class AqualiaSensor(
         self.entity_description = description
         self._attr_unique_id = f"{entry.entry_id}_{description.key}"
         self._attr_has_entity_name = True
-        self._attr_name = description.name
+        # No _attr_name: setting it would override the translated name.  HA
+        # resolves translation_key first and falls back to description.name.
+        self._attr_translation_key = description.translation_key
         self._attr_device_info = _device_info(entry)
 
     @property
@@ -311,7 +327,8 @@ class AqualiaCumulativeSensor(
     _attr_state_class = SensorStateClass.TOTAL_INCREASING
     _attr_icon = "mdi:water-plus"
     _attr_has_entity_name = True
-    _attr_name = "Total Consumption (Aqualia meter index)"
+    _attr_translation_key = "total_consumption"
+    _attr_name = None
 
     def __init__(
         self,

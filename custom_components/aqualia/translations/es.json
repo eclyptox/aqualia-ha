@@ -21,6 +21,13 @@
           "poll_interval_minutes": "Intervalo de consulta (minutos)",
           "days_back": "Días de histórico"
         }
+      },
+      "reauth_confirm": {
+        "title": "Aqualia — Reautenticación",
+        "description": "Aqualia ha rechazado las credenciales guardadas para {nif}. Introduce la contraseña actual.",
+        "data": {
+          "password": "Contraseña"
+        }
       }
     },
     "error": {
@@ -29,7 +36,20 @@
       "unknown": "Error inesperado."
     },
     "abort": {
-      "already_configured": "Este contrato ya está configurado."
+      "already_configured": "Este contrato ya está configurado.",
+      "reauth_successful": "Aqualia se ha reautenticado correctamente."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Aqualia — Opciones",
+        "description": "Ajusta cada cuánto se consulta a Aqualia y cuánto histórico se recupera.",
+        "data": {
+          "poll_interval_minutes": "Intervalo de consulta (minutos)",
+          "days_back": "Días de histórico"
+        }
+      }
     }
   },
   "entity": {
@@ -37,17 +57,20 @@
       "last_value": {
         "name": "Última lectura"
       },
+      "today_consumption": {
+        "name": "Consumido hoy"
+      },
+      "monthly_total": {
+        "name": "Consumido este mes"
+      },
       "daily_normalized": {
-        "name": "Consumo diario normalizado"
+        "name": "Consumo diario estimado"
       },
       "avg_daily_30d": {
         "name": "Media 30 días"
       },
       "ratio_vs_avg": {
         "name": "Ratio frente a media"
-      },
-      "monthly_total": {
-        "name": "Total mensual"
       },
       "days_since_reading": {
         "name": "Días desde última lectura"
@@ -60,6 +83,21 @@
       },
       "total_consumption": {
         "name": "Consumo total"
+      },
+      "latest_invoice_amount": {
+        "name": "Última factura"
+      },
+      "latest_invoice_due_date": {
+        "name": "Vencimiento factura"
+      },
+      "pending_invoice_amount": {
+        "name": "Importe pendiente"
+      },
+      "avg_invoice_amount": {
+        "name": "Media de facturas"
+      },
+      "water_price_per_m3": {
+        "name": "Precio estimado del agua"
       }
     }
   }

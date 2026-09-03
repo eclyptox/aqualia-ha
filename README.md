@@ -2,7 +2,7 @@
 
 [![hacs_badge](https://img.shields.io/badge/HACS-Custom-41BDF5.svg?logo=homeassistantcommunitystore&logoColor=white)](https://github.com/hacs/integration)
 [![Home Assistant](https://img.shields.io/badge/Home%20Assistant-2024.1%2B-blue?logo=homeassistant&logoColor=white)](https://www.home-assistant.io/)
-[![Tests](https://img.shields.io/badge/tests-152%20passed-brightgreen?logo=pytest&logoColor=white)](tests/)
+[![Tests](https://img.shields.io/badge/tests-232%20passed-brightgreen?logo=pytest&logoColor=white)](tests/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 Integración personalizada para Home Assistant que consulta el consumo de agua de Aqualia y crea sensores nativos, incluyendo consumo acumulado, datos de facturación y precio estimado del agua compatibles con el **Energy Dashboard**.
@@ -41,6 +41,18 @@ La integración intenta descubrir tus contratos automáticamente. Si tiene éxit
 | Intervalo de consulta | Minutos entre actualizaciones | 60 |
 | Días de histórico | Lecturas a recuperar en el primer arranque | 60 |
 
+## Cambiar opciones después de instalar
+
+En **Ajustes → Dispositivos y servicios → Aqualia → Configurar** puedes ajustar el intervalo de
+consulta y los días de histórico sin borrar ni recrear la integración. Al guardar, la integración se
+recarga automáticamente para aplicar el nuevo intervalo.
+
+## Reautenticación
+
+Si cambias la contraseña en la web de Aqualia, la integración lo detecta y Home Assistant muestra un
+aviso de **"Reautenticación necesaria"**. Pulsa sobre él e introduce la nueva contraseña: los datos
+del contrato se conservan y no hay que volver a configurar nada.
+
 ## Cómo obtener los códigos del contrato (solo si el discovery falla)
 
 1. Entra en `https://oficinavirtual.aqualia.es/`.
@@ -77,11 +89,11 @@ La integración crea estas entidades bajo el dispositivo **Aqualia Water Meter**
 
 | Sensor | Unidad | Descripción |
 | --- | --- | --- |
-| Última factura | € | Importe de la última factura. Atributos: `period` ("Ene-Feb / 2026"), `status` ("Pagado") |
+| Última factura | EUR | Importe de la última factura. Atributos: `period` ("Ene-Feb / 2026"), `status` ("Pagado") |
 | Vencimiento factura | timestamp | Fecha de vencimiento de la última factura (útil para automatizaciones de aviso de cobro) |
-| Importe pendiente | € | Suma de importes sin pagar. 0 € si todo está al día |
-| Media de facturas | € | Importe medio de las facturas disponibles (referencia bimestral) |
-| Precio estimado del agua | €/m³ | Coste efectivo medio (cuota fija + variable) por m³. Usado en el Energy Dashboard para calcular el gasto en € |
+| Importe pendiente | EUR | Suma de importes sin pagar. 0 € si todo está al día |
+| Media de facturas | EUR | Importe medio de las facturas disponibles (referencia bimestral) |
+| Precio estimado del agua | EUR/m³ | Coste efectivo medio (cuota fija + variable) por m³. Usado en el Energy Dashboard para calcular el gasto en € |
 
 > **Nota sobre el precio estimado:** no es el precio marginal por m³ de la tarifa, sino el coste real total
 > (incluyendo cuotas fijas de servicio, alcantarillado, etc.) dividido entre el volumen consumido en el
@@ -154,8 +166,28 @@ automation:
 - Los sensores con datos derivados pasan a `unavailable` tras 7 días sin lectura, lo que permite crear automatizaciones de alerta con el trigger `state → unavailable`.
 - Los sensores de consumo y el acumulado **no pasan a `unavailable` por fallos puntuales de la API**: conservan el último valor conocido y añaden el atributo `api_error` si hay un error activo.
 - Las facturas se consultan cada 12 horas (endpoint `/invoice/v1/api/invoice/Invoice/GetList`). Si el config entry no tiene los campos del `ContractIdentifier` completo (instalaciones anteriores), el coordinator los resuelve automáticamente desde `GetUserLinkedContracts` sin necesidad de reconfigurar.
-- El precio estimado (€/m³) se calcula como: `media_facturas / (media_diaria_L × días_período / 1000)`, donde el período bimestral se estima a partir de las fechas de emisión de las facturas disponibles.
+- Los sensores *Consumido hoy* y *Consumido este mes* usan la zona horaria configurada en Home
+  Assistant, no UTC. Con UTC, una lectura de justo después de medianoche caía en el día anterior.
+- Los sensores de importe usan el código ISO 4217 `EUR` como unidad (lo que espera `device_class:
+  monetary`), no el símbolo `€`. Si actualizas desde una versión anterior, Home Assistant puede
+  preguntar si quieres convertir las estadísticas históricas: acepta la conversión.
+- Los nombres de las entidades se traducen mediante `translation_key` (disponibles en español e
+  inglés). Los `entity_id` no cambian al actualizar, solo el nombre visible.
+- Los datos malformados que devuelve la API ocasionalmente (importes o fechas a `null`, fechas no
+  ISO) se descartan con un aviso en el log en lugar de interrumpir la actualización.
+- El precio estimado (EUR/m³) se calcula como: `media_facturas / (media_diaria_L × días_período / 1000)`, donde el período bimestral se estima a partir de las fechas de emisión de las facturas disponibles.
 
 ## Repositorio legacy
 
 La carpeta `aqualia/` conserva el add-on MQTT original. No es necesaria para la instalación recomendada.
+
+## Desarrollo
+
+```bash
+pip install -r requirements-test.txt
+python -m pytest                                   # 232 tests
+python -m pytest --cov=custom_components/aqualia   # cobertura
+```
+
+Los tests no requieren tener Home Assistant instalado: `tests/ha_stubs.py` aporta la superficie
+mínima de HA. `voluptuous` sí es necesario, porque es lo que construye los esquemas del config flow.

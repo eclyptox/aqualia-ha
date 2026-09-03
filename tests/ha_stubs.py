@@ -45,8 +45,69 @@ class CoordinatorEntity(Generic[_T]):
 
 
 class ConfigEntry:
-    entry_id: str = ""
-    data: dict = {}
+    def __init__(self, entry_id: str = "", data: dict | None = None, options: dict | None = None):
+        self.entry_id = entry_id
+        self.data = data or {}
+        self.options = options or {}
+
+    def add_update_listener(self, listener):
+        self._listener = listener
+        return lambda: None
+
+    def async_on_unload(self, func):
+        return func
+
+
+class ConfigFlowResult(dict):
+    """Stub result: HA returns a typed dict; asserting on keys is enough here."""
+
+
+class _FlowBase:
+    """Shared stub behaviour for ConfigFlow and OptionsFlow."""
+
+    hass = None
+    context: dict = {}
+
+    def __init_subclass__(cls, **kwargs):
+        # Absorbs `domain=DOMAIN` from `class Foo(ConfigFlow, domain=...)`.
+        super().__init_subclass__()
+
+    def async_show_form(
+        self, *, step_id, data_schema=None, errors=None, description_placeholders=None
+    ) -> ConfigFlowResult:
+        return ConfigFlowResult(
+            type="form",
+            step_id=step_id,
+            data_schema=data_schema,
+            errors=errors or {},
+            description_placeholders=description_placeholders,
+        )
+
+    def async_create_entry(self, *, title, data) -> ConfigFlowResult:
+        return ConfigFlowResult(type="create_entry", title=title, data=data)
+
+    def async_abort(self, *, reason) -> ConfigFlowResult:
+        return ConfigFlowResult(type="abort", reason=reason)
+
+
+class ConfigFlow(_FlowBase):
+    unique_id: str | None = None
+
+    async def async_set_unique_id(self, unique_id):
+        self.unique_id = unique_id
+        return None
+
+    def _abort_if_unique_id_configured(self):
+        return None
+
+
+class OptionsFlow(_FlowBase):
+    pass
+
+
+def callback(func):
+    """HA's @callback marker — a no-op for tests."""
+    return func
 
 
 class UpdateFailed(Exception):
@@ -92,12 +153,16 @@ def _install():
     cfg_mod = _mod("homeassistant.config_entries")
     cfg_mod.ConfigEntry = ConfigEntry
     cfg_mod.ConfigEntryAuthFailed = ConfigEntryAuthFailed
+    cfg_mod.ConfigFlow = ConfigFlow
+    cfg_mod.ConfigFlowResult = ConfigFlowResult
+    cfg_mod.OptionsFlow = OptionsFlow
 
     exc_mod = _mod("homeassistant.exceptions")
     exc_mod.ConfigEntryAuthFailed = ConfigEntryAuthFailed
 
     core_mod = _mod("homeassistant.core")
     core_mod.HomeAssistant = object
+    core_mod.callback = callback
 
     entity_platform_mod = _mod("homeassistant.helpers.entity_platform")
     entity_platform_mod.AddEntitiesCallback = object
@@ -105,3 +170,7 @@ def _install():
     for name in ["homeassistant", "homeassistant.helpers"]:
         if name not in sys.modules:
             _mod(name)
+
+    # `from homeassistant import config_entries` reads the package attribute.
+    sys.modules["homeassistant"].config_entries = cfg_mod
+    sys.modules["homeassistant"].core = core_mod

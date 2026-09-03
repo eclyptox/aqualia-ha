@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import time
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
 import requests
@@ -182,6 +182,7 @@ class AqualiaClient:
         contract_code: int,
         installation_code: int,
         contract_number: str,
+        tz: tzinfo | None = None,
     ) -> dict[str, Any]:
         """Fetch readings and return parsed metrics plus the raw readings list."""
 
@@ -195,7 +196,7 @@ class AqualiaClient:
             installation_code=installation_code,
             contract_number=contract_number,
         )
-        return {"readings": readings, **ConsumptionParser(readings).parse()}
+        return {"readings": readings, **ConsumptionParser(readings, tz=tz).parse()}
 
     def get_contracts(self) -> list[dict[str, Any]] | None:
         """Return contracts for the authenticated user.
@@ -347,16 +348,40 @@ class ConsumptionParser:
       DateTimeConsumptionCurve  — ISO datetime of the reading
       ConsumptionValue          — litres consumed in this interval
       ReadingIndex              — cumulative meter total (odometer-style)
+
+    Readings whose date is missing or unparseable are dropped with a warning
+    rather than raising: a single malformed entry must not freeze every sensor.
+
+    ``tz`` is the Home Assistant timezone, used for the calendar-bound metrics
+    (today / this month).  Defaults to UTC, which is only correct for users
+    actually running in UTC.
     """
 
     _DATE = "DateTimeConsumptionCurve"
     _VALUE = "ConsumptionValue"
     _INDEX = "ReadingIndex"
 
-    def __init__(self, readings: list[dict[str, Any]]) -> None:
-        self.readings = sorted(
-            readings, key=lambda item: _parse_datetime(item.get(self._DATE))
-        )
+    def __init__(
+        self,
+        readings: list[dict[str, Any]] | None,
+        tz: tzinfo | None = None,
+    ) -> None:
+        self.tz = tz or UTC
+        # Parse each date once and keep it alongside the reading, so the
+        # metric methods below never re-parse and never hit a bad value.
+        pairs: list[tuple[datetime, dict[str, Any]]] = []
+        for item in readings or []:
+            parsed = _parse_datetime(item.get(self._DATE))
+            if parsed is None:
+                _LOGGER.warning(
+                    "Ignorando lectura de Aqualia con fecha inválida: %r",
+                    item.get(self._DATE),
+                )
+                continue
+            pairs.append((parsed, item))
+        pairs.sort(key=lambda pair: pair[0])
+        self._dates: list[datetime] = [date for date, _ in pairs]
+        self.readings: list[dict[str, Any]] = [reading for _, reading in pairs]
 
     def parse(self) -> dict[str, Any]:
         if not self.readings:
@@ -387,60 +412,53 @@ class ConsumptionParser:
         }
 
     def _last_value(self) -> float:
-        return float(self.readings[-1].get(self._VALUE, 0))
+        return _to_float(self.readings[-1].get(self._VALUE))
 
     def _reading_index(self) -> float | None:
-        val = self.readings[-1].get(self._INDEX)
+        val = _to_float(self.readings[-1].get(self._INDEX))
         # Return None when missing or zero so the cumulative sensor stays
         # unavailable rather than emitting 0 — a transient 0 from the API
         # would otherwise cause total_increasing to count the full meter
         # value as new consumption when the real reading returns.
-        return float(val) if val else None
+        return val or None
 
     def _last_reading_date(self) -> datetime:
-        return _parse_datetime(self.readings[-1].get(self._DATE))
+        return self._dates[-1]
 
     def _reading_gap_days(self) -> int:
-        if len(self.readings) < 2:
+        if len(self._dates) < 2:
             return 1
-        gap = (
-            _parse_datetime(self.readings[-1].get(self._DATE))
-            - _parse_datetime(self.readings[-2].get(self._DATE))
-        ).days
-        return max(1, gap)
+        return max(1, (self._dates[-1] - self._dates[-2]).days)
 
     def _daily_normalized(self) -> float:
         return self._last_value() / self._reading_gap_days()
 
     def _today_consumption(self) -> float:
-        today = datetime.now(UTC).date()
+        today = datetime.now(self.tz).date()
         return sum(
-            float(r.get(self._VALUE, 0))
-            for r in self.readings
-            if _parse_datetime(r.get(self._DATE)).date() == today
+            _to_float(reading.get(self._VALUE))
+            for date, reading in zip(self._dates, self.readings)
+            if date.astimezone(self.tz).date() == today
         )
 
     def _monthly_total(self) -> float:
-        now = datetime.now(UTC)
-        month_start = datetime(now.year, now.month, 1, tzinfo=UTC)
-        total = 0.0
-        for reading in self.readings:
-            date = _parse_datetime(reading.get(self._DATE))
-            if date >= month_start:
-                total += float(reading.get(self._VALUE, 0))
-        return total
+        now = datetime.now(self.tz)
+        month_start = datetime(now.year, now.month, 1, tzinfo=self.tz)
+        return sum(
+            _to_float(reading.get(self._VALUE))
+            for date, reading in zip(self._dates, self.readings)
+            if date >= month_start
+        )
 
     def _avg_daily_30d(self) -> float:
         thirty_days_ago = datetime.now(UTC) - timedelta(days=30)
         values: list[float] = []
-        for index, reading in enumerate(self.readings):
-            date = _parse_datetime(reading.get(self._DATE))
+        for index, date in enumerate(self._dates):
             if date < thirty_days_ago:
                 continue
-            value = float(reading.get(self._VALUE, 0))
+            value = _to_float(self.readings[index].get(self._VALUE))
             if index > 0:
-                previous_date = _parse_datetime(self.readings[index - 1].get(self._DATE))
-                gap = max(1, (date - previous_date).days)
+                gap = max(1, (date - self._dates[index - 1]).days)
             else:
                 gap = 1
             values.append(value / gap)
@@ -464,18 +482,22 @@ class InvoiceParser:
     water volume consumed during a typical billing period.  It is useful
     as a price sensor for the HA Energy Dashboard, but does not reflect the
     marginal per-m³ tariff shown on the invoice breakdown.
+
+    Every field is read defensively: the API returns explicit nulls for
+    amounts and dates on some documents, and a TypeError here would stall
+    invoice refreshes indefinitely behind the coordinator's cache.
     """
 
     _TYPICAL_BILLING_DAYS = 61  # Aqualia bills every ~2 months
 
     def __init__(
         self,
-        documents: list[dict[str, Any]],
+        documents: list[dict[str, Any]] | None,
         avg_daily_liters: float | None = None,
     ) -> None:
         self.documents = sorted(
-            documents,
-            key=lambda d: d.get("IssueDate", ""),
+            documents or [],
+            key=lambda d: str(d.get("IssueDate") or ""),
             reverse=True,
         )
         self.avg_daily_liters = avg_daily_liters
@@ -493,17 +515,20 @@ class InvoiceParser:
             }
 
         latest = self.documents[0]
-        pending = round(sum(d.get("PendingAmount", 0) for d in self.documents), 2)
-        amounts = [d["TotalAmount"] for d in self.documents if d.get("TotalAmount") is not None]
+        pending = round(
+            sum(_to_float(d.get("PendingAmount")) for d in self.documents), 2
+        )
+        amounts = [
+            _to_float(d.get("TotalAmount"))
+            for d in self.documents
+            if d.get("TotalAmount") is not None
+        ]
         avg_amount = sum(amounts) / len(amounts) if amounts else None
 
-        raw_due = latest.get("DueDate")
-        due_date = _parse_datetime(raw_due) if raw_due else None
-
         return {
-            "latest_invoice_amount": latest.get("TotalAmount"),
+            "latest_invoice_amount": _to_float(latest.get("TotalAmount"), None),
             "latest_invoice_period": latest.get("Period"),
-            "latest_invoice_due_date": due_date,
+            "latest_invoice_due_date": _parse_datetime(latest.get("DueDate")),
             "latest_invoice_status": latest.get("Status"),
             "pending_invoice_amount": pending,
             "avg_invoice_amount": round(avg_amount, 2) if avg_amount is not None else None,
@@ -522,9 +547,9 @@ class InvoiceParser:
     def _billing_period_days(self) -> int:
         """Estimate billing period length from gaps between invoice dates."""
         dates = [
-            _parse_datetime(d.get("IssueDate", ""))
-            for d in self.documents
-            if d.get("IssueDate")
+            parsed
+            for parsed in (_parse_datetime(d.get("IssueDate")) for d in self.documents)
+            if parsed is not None
         ]
         if len(dates) < 2:
             return self._TYPICAL_BILLING_DAYS
@@ -532,10 +557,28 @@ class InvoiceParser:
         return round(sum(gaps) / len(gaps)) or self._TYPICAL_BILLING_DAYS
 
 
-def _parse_datetime(value: Any) -> datetime:
+def _to_float(value: Any, default: float | None = 0.0) -> Any:
+    """Coerce an API value to float, falling back to ``default``.
+
+    Aqualia returns explicit nulls (and occasionally empty strings) for
+    amounts and readings; float(None) would otherwise raise mid-update.
+    """
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _parse_datetime(value: Any) -> datetime | None:
+    """Parse an API datetime into an aware UTC datetime, or None if unusable."""
     if not value:
-        return datetime.min.replace(tzinfo=UTC)
-    parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
