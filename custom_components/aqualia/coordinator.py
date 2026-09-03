@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, tzinfo
 from functools import partial
 import logging
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
@@ -33,6 +34,34 @@ from .const import (
 _LOGGER = logging.getLogger(__name__)
 
 
+def get_option(entry: ConfigEntry, key: str, default: Any) -> Any:
+    """Read a tunable, preferring the options flow over the original setup data.
+
+    Entries created before the options flow existed keep these values in
+    ``data``; the options flow writes to ``options``.  Options win.
+    """
+    value = entry.options.get(key)
+    if value is not None:
+        return value
+    return entry.data.get(key, default)
+
+
+def resolve_timezone(hass: HomeAssistant) -> tzinfo:
+    """Return Home Assistant's configured timezone, falling back to UTC.
+
+    Calendar-bound metrics (today / this month) must use the user's local
+    day boundary, not UTC's — otherwise a reading is filed under the wrong
+    day between midnight and the UTC offset.
+    """
+    name = getattr(hass.config, "time_zone", None)
+    if isinstance(name, str):
+        try:
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001 - unknown zone name, fall back
+            _LOGGER.debug("Zona horaria de HA no reconocida: %s", name)
+    return UTC
+
+
 class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     """Fetch Aqualia metrics at a configured interval."""
 
@@ -54,7 +83,8 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             _LOGGER,
             name=DOMAIN,
             update_interval=timedelta(
-                minutes=entry.data.get(
+                minutes=get_option(
+                    entry,
                     CONF_POLL_INTERVAL_MINUTES,
                     int(DEFAULT_UPDATE_INTERVAL.total_seconds() / 60),
                 )
@@ -67,11 +97,12 @@ class AqualiaDataUpdateCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             consumption = await self.hass.async_add_executor_job(
                 partial(
                     self.client.fetch_metrics,
-                    days_back=data.get(CONF_DAYS_BACK, DEFAULT_DAYS_BACK),
+                    days_back=get_option(self.entry, CONF_DAYS_BACK, DEFAULT_DAYS_BACK),
                     cac_code=data[CONF_CAC_CODE],
                     contract_code=data[CONF_CONTRACT_CODE],
                     installation_code=data[CONF_INSTALLATION_CODE],
                     contract_number=data[CONF_CONTRACT_NUMBER],
+                    tz=resolve_timezone(self.hass),
                 )
             )
             self.last_error = None

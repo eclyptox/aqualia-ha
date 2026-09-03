@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import partial
 from typing import Any
 
@@ -9,7 +10,7 @@ import voluptuous as vol
 
 from homeassistant import config_entries
 from homeassistant.const import CONF_PASSWORD
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, callback
 
 from .api import AqualiaApiError, AqualiaAuthError, AqualiaClient
 from .const import (
@@ -60,6 +61,15 @@ class AqualiaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._nif: str = ""
         self._password: str = ""
         self._contracts: list[dict[str, Any]] | None = None
+        self._reauth_entry: config_entries.ConfigEntry | None = None
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(
+        config_entry: config_entries.ConfigEntry,
+    ) -> AqualiaOptionsFlow:
+        """Return the options flow for tuning poll interval and history depth."""
+        return AqualiaOptionsFlow(config_entry)
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
@@ -163,6 +173,75 @@ class AqualiaConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     else "No se encontraron contratos automáticamente. Introduce los códigos manualmente."
                 )
             },
+        )
+
+    async def async_step_reauth(
+        self, entry_data: Mapping[str, Any]
+    ) -> config_entries.ConfigFlowResult:
+        """Start reauth after the coordinator raised ConfigEntryAuthFailed.
+
+        Triggered when Aqualia rejects the stored credentials — typically
+        because the user changed their password on the web portal.
+        """
+        self._reauth_entry = self.hass.config_entries.async_get_entry(
+            self.context["entry_id"]
+        )
+        self._nif = entry_data.get(CONF_NIF, "")
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        """Ask for the new password and revalidate against the stored contract."""
+        errors: dict[str, str] = {}
+        entry = self._reauth_entry
+
+        if user_input is not None and entry is not None:
+            data = {**entry.data, CONF_PASSWORD: user_input[CONF_PASSWORD]}
+            try:
+                await _validate_input(self.hass, data)
+            except AqualiaAuthError:
+                errors["base"] = "invalid_auth"
+            except AqualiaApiError:
+                errors["base"] = "cannot_connect"
+            except Exception:  # noqa: BLE001
+                errors["base"] = "unknown"
+            else:
+                self.hass.config_entries.async_update_entry(entry, data=data)
+                await self.hass.config_entries.async_reload(entry.entry_id)
+                return self.async_abort(reason="reauth_successful")
+
+        return self.async_show_form(
+            step_id="reauth_confirm",
+            data_schema=vol.Schema({vol.Required(CONF_PASSWORD): str}),
+            errors=errors,
+            description_placeholders={"nif": self._nif},
+        )
+
+
+class AqualiaOptionsFlow(config_entries.OptionsFlow):
+    """Let the user retune poll interval and history depth without re-adding.
+
+    Values are written to ``entry.options``; ``coordinator.get_option`` reads
+    options first and falls back to ``entry.data`` for entries created before
+    this flow existed.
+    """
+
+    def __init__(self, config_entry: config_entries.ConfigEntry) -> None:
+        # Stored under a private name: assigning to ``self.config_entry`` is
+        # deprecated in newer Home Assistant versions.
+        self._entry = config_entry
+
+    async def async_step_init(
+        self, user_input: dict[str, Any] | None = None
+    ) -> config_entries.ConfigFlowResult:
+        if user_input is not None:
+            return self.async_create_entry(title="", data=user_input)
+
+        current = {**self._entry.data, **self._entry.options}
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema(_advanced_defaults(current)),
         )
 
 
