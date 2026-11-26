@@ -29,7 +29,10 @@ python3 -m pytest tests/test_sensor.py -k stale
 python3 -m pytest --cov=custom_components/aqualia
 ```
 
-No hay linter configurado. `.github/workflows/ci.yml` ejecuta pytest + hassfest + validación HACS.
+No hay linter configurado ni CI en GitHub: la CI es local. `scripts/ci.sh` ejecuta pytest + hassfest +
+validación HACS (los dos últimos con Docker; HACS usa el token de `gh` y `SKIP_HACS=1` lo omite).
+El hook `.githooks/pre-push` lo lanza antes de cada push; en un clon nuevo hay que activarlo una vez con
+`git config core.hooksPath .githooks`. `git push --no-verify` lo salta.
 
 ## Arquitectura
 
