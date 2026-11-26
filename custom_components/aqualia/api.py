@@ -2,14 +2,43 @@
 
 from __future__ import annotations
 
+import base64
+import json
 import logging
+import os
 import time
 from datetime import UTC, datetime, timedelta, tzinfo
 from typing import Any
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPublicKey
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import requests
 
 _LOGGER = logging.getLogger(__name__)
+
+_OAEP_SHA256 = padding.OAEP(
+    mgf=padding.MGF1(algorithm=hashes.SHA256()),
+    algorithm=hashes.SHA256(),
+    label=None,
+)
+# ResponseCode the web app maps to "usuario o contraseña incorrectos".
+_LOGIN_INVALID_CREDENTIALS = "99980"
+
+# Aqualia rate-limits logins per account.  HA rebuilds the client on every
+# setup retry (every 1-2 min), which is enough to keep the block alive
+# indefinitely, so the pause after a 429 lives at module level, keyed by NIF.
+_LOGIN_COOLDOWN = timedelta(minutes=30)
+_LOGIN_COOLDOWN_UNTIL: dict[str, datetime] = {}
+
+
+def _retry_after(response: Any) -> timedelta:
+    """Honour a numeric Retry-After header, else fall back to the default pause."""
+    value = str(getattr(response, "headers", {}).get("Retry-After", "")).strip()
+    if value.isdigit():
+        return timedelta(seconds=int(value))
+    return _LOGIN_COOLDOWN
 
 
 class AqualiaApiError(Exception):
@@ -18,6 +47,10 @@ class AqualiaApiError(Exception):
 
 class AqualiaAuthError(AqualiaApiError):
     """Authentication failed."""
+
+
+class AqualiaRateLimitError(AqualiaApiError):
+    """Aqualia answered 429; retrying immediately only prolongs the block."""
 
 
 class AqualiaClient:
@@ -34,6 +67,7 @@ class AqualiaClient:
     INVOICES_URL = (
         f"{BASE_URL}/invoice/v1/api/invoice/Invoice/GetList"
     )
+    WEB_CONFIG_URL = "https://oficinavirtual.aqualia.es/config/config.json"
 
     def __init__(self, nif: str, password: str) -> None:
         self.nif = nif
@@ -41,6 +75,7 @@ class AqualiaClient:
         self.session = requests.Session()
         self.token: str | None = None
         self.token_expires_at: datetime | None = None
+        self._public_key: RSAPublicKey | None = None
 
     def _get_common_headers(self) -> dict[str, str]:
         return {
@@ -54,24 +89,100 @@ class AqualiaClient:
             "Referer": "https://oficinavirtual.aqualia.es/",
         }
 
+    def _get_public_key(self) -> RSAPublicKey:
+        """Return the RSA key the web app uses to encrypt auth fields.
+
+        It is read from the web app's own config (``pkEnc``, base64 of a PEM)
+        instead of being hard-coded, so a key rotation on Aqualia's side does
+        not break the integration.
+        """
+        if self._public_key is not None:
+            return self._public_key
+
+        response = self.session.get(
+            self.WEB_CONFIG_URL, headers=self._get_common_headers(), timeout=10
+        )
+        response.raise_for_status()
+        encoded = (response.json() or {}).get("pkEnc")
+        if not encoded:
+            raise AqualiaApiError("La configuración web de Aqualia no trae pkEnc")
+        try:
+            key = serialization.load_pem_public_key(base64.b64decode(encoded))
+        except Exception as err:  # noqa: BLE001 - malformed key from server
+            raise AqualiaApiError(f"pkEnc de Aqualia no válida: {err}") from err
+        if not isinstance(key, RSAPublicKey):
+            raise AqualiaApiError("pkEnc de Aqualia no es una clave RSA")
+        self._public_key = key
+        return key
+
+    def _encrypt_field(self, value: bytes) -> str:
+        return base64.b64encode(
+            self._get_public_key().encrypt(value, _OAEP_SHA256)
+        ).decode()
+
     def _login(self) -> None:
+        # Since Nov 2026 the auth endpoint rejects plain credentials ("The User
+        # parameter does not meet the encryption criteria").  Mirror the web
+        # app: RSA-OAEP each field, send a random AES key the same way, and
+        # decrypt the AES-GCM ``Payload`` that comes back.
+        aes_key = os.urandom(32)
+        body = {
+            "LoginType": 1,
+            "User": self._encrypt_field(self.nif.encode()),
+            "Password": self._encrypt_field(self.password.encode()),
+            "SessionKey": self._encrypt_field(aes_key),
+        }
         response = self.session.post(
             self.LOGIN_URL,
-            json={"LoginType": 1, "User": self.nif, "Password": self.password},
+            json=body,
             headers=self._get_common_headers(),
             timeout=10,
         )
         if response.status_code in (401, 403):
             raise AqualiaAuthError("Credenciales de Aqualia inválidas")
+        if response.status_code == 429:
+            until = datetime.now(UTC) + _retry_after(response)
+            _LOGIN_COOLDOWN_UNTIL[self.nif] = until
+            raise AqualiaRateLimitError(
+                "Aqualia está limitando los logins (429 Too Many Requests); "
+                f"no se reintenta hasta {until.isoformat(timespec='minutes')}"
+            )
         response.raise_for_status()
 
-        token = response.json().get("Token")
+        data = self._decrypt_payload(response.json(), aes_key)
+        token = data.get("Token")
         if not token:
-            raise AqualiaAuthError("No se recibió Token en el login")
+            code = str(data.get("ResponseCode") or "")
+            if code == _LOGIN_INVALID_CREDENTIALS:
+                raise AqualiaAuthError("Credenciales de Aqualia inválidas")
+            raise AqualiaApiError(
+                f"Login de Aqualia sin Token (ResponseCode={code or 'n/a'})"
+            )
 
         self.token = token
-        self.token_expires_at = datetime.now(UTC) + timedelta(hours=8)
+        expires_at = datetime.now(UTC) + timedelta(hours=8)
+        server_expiry = _parse_datetime(data.get("TokenExpirationDate"))
+        if server_expiry is not None and server_expiry < expires_at:
+            expires_at = server_expiry
+        self.token_expires_at = expires_at
         _LOGGER.debug("Aqualia login completed")
+
+    @staticmethod
+    def _decrypt_payload(response_json: Any, aes_key: bytes) -> dict[str, Any]:
+        payload = (
+            response_json.get("Payload") if isinstance(response_json, dict) else None
+        )
+        if not payload:
+            raise AqualiaApiError("Respuesta de login de Aqualia sin Payload cifrado")
+        try:
+            blob = base64.b64decode(payload)
+            plain = AESGCM(aes_key).decrypt(blob[:12], blob[12:], None)
+            data = json.loads(plain)
+        except Exception as err:  # noqa: BLE001 - corrupt/unexpected payload
+            raise AqualiaApiError(f"No se pudo descifrar el login: {err}") from err
+        if not isinstance(data, dict):
+            raise AqualiaApiError("Payload de login de Aqualia inesperado")
+        return data
 
     def _ensure_token(self) -> None:
         if (
@@ -81,13 +192,24 @@ class AqualiaClient:
         ):
             return
 
+        blocked_until = _LOGIN_COOLDOWN_UNTIL.get(self.nif)
+        if blocked_until is not None:
+            if datetime.now(UTC) < blocked_until:
+                raise AqualiaRateLimitError(
+                    "Login de Aqualia en pausa tras un 429 hasta "
+                    f"{blocked_until.isoformat(timespec='minutes')}"
+                )
+            del _LOGIN_COOLDOWN_UNTIL[self.nif]
+
         backoff_times = [5, 15, 60]
         last_error: Exception | None = None
         for attempt in range(3):
             try:
                 self._login()
                 return
-            except AqualiaAuthError:
+            except (AqualiaAuthError, AqualiaRateLimitError):
+                # Retrying a 429 only extends the block: HA's setup retry
+                # already re-runs us with its own backoff.
                 raise
             except Exception as err:  # noqa: BLE001 - convert library errors.
                 last_error = err

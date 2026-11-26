@@ -1,13 +1,32 @@
 """Tests for AqualiaClient (HTTP interactions mocked)."""
 
+import base64
 from datetime import UTC, datetime, timedelta
+import json as jsonlib
+import os
 from typing import Any
 from unittest.mock import MagicMock, patch, PropertyMock
 
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import padding, rsa
+from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 import pytest
 import requests
 
-from aqualia.api import AqualiaAuthError, AqualiaApiError, AqualiaClient
+from aqualia import api as api_module
+from aqualia.api import (
+    AqualiaApiError,
+    AqualiaAuthError,
+    AqualiaClient,
+    AqualiaRateLimitError,
+)
+
+
+@pytest.fixture(autouse=True)
+def _reset_login_cooldown():
+    api_module._LOGIN_COOLDOWN_UNTIL.clear()
+    yield
+    api_module._LOGIN_COOLDOWN_UNTIL.clear()
 
 
 def _make_response(status_code: int, json_data: Any = None) -> MagicMock:
@@ -32,45 +51,144 @@ def _contract_kwargs() -> dict:
     )
 
 
+_PRIVATE_KEY = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+_OAEP = padding.OAEP(
+    mgf=padding.MGF1(hashes.SHA256()), algorithm=hashes.SHA256(), label=None
+)
+
+
+def _rsa_decrypt(value_b64: str) -> bytes:
+    return _PRIVATE_KEY.decrypt(base64.b64decode(value_b64), _OAEP)
+
+
+def _login_client(password: str = "pass") -> AqualiaClient:
+    client = AqualiaClient("12345678A", password)
+    client._public_key = _PRIVATE_KEY.public_key()
+    return client
+
+
+def _encrypted_login_response(payload: dict, status_code: int = 200):
+    """Build a side_effect that answers like Aqualia: AES-GCM with the session key."""
+
+    def _post(url, json=None, **kwargs):
+        aes_key = _rsa_decrypt(json["SessionKey"])
+        iv = os.urandom(12)
+        blob = iv + AESGCM(aes_key).encrypt(iv, jsonlib.dumps(payload).encode(), None)
+        return _make_response(
+            status_code, {"Payload": base64.b64encode(blob).decode()}
+        )
+
+    return _post
+
+
 class TestLogin:
     def test_successful_login_stores_token(self):
-        client = AqualiaClient("12345678A", "pass")
+        client = _login_client()
         with patch.object(client.session, "post") as mock_post:
-            mock_post.return_value = _make_response(200, {"Token": "jwt-abc"})
+            mock_post.side_effect = _encrypted_login_response(
+                {"ResponseCode": "00001", "Token": "jwt-abc"}
+            )
             client._login()
         assert client.token == "jwt-abc"
         assert client.token_expires_at is not None
 
+    def test_credentials_are_sent_rsa_encrypted(self):
+        client = _login_client("s3cret")
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.side_effect = _encrypted_login_response({"Token": "tok"})
+            client._login()
+        body = mock_post.call_args.kwargs["json"]
+        assert body["LoginType"] == 1
+        assert _rsa_decrypt(body["User"]) == b"12345678A"
+        assert _rsa_decrypt(body["Password"]) == b"s3cret"
+        assert len(_rsa_decrypt(body["SessionKey"])) == 32
+
     def test_401_raises_auth_error(self):
-        client = AqualiaClient("12345678A", "bad")
+        client = _login_client("bad")
         with patch.object(client.session, "post") as mock_post:
             mock_post.return_value = _make_response(401)
             with pytest.raises(AqualiaAuthError):
                 client._login()
 
     def test_403_raises_auth_error(self):
-        client = AqualiaClient("12345678A", "bad")
+        client = _login_client("bad")
         with patch.object(client.session, "post") as mock_post:
             mock_post.return_value = _make_response(403)
             with pytest.raises(AqualiaAuthError):
                 client._login()
 
-    def test_missing_token_in_response_raises_auth_error(self):
-        client = AqualiaClient("12345678A", "pass")
+    def test_invalid_credentials_response_code_raises_auth_error(self):
+        client = _login_client("bad")
         with patch.object(client.session, "post") as mock_post:
-            mock_post.return_value = _make_response(200, {"OtherField": "value"})
+            mock_post.side_effect = _encrypted_login_response(
+                {"ResponseCode": "99980", "ResponseDescription": "Ok"}
+            )
             with pytest.raises(AqualiaAuthError):
                 client._login()
 
+    def test_unknown_response_code_without_token_raises_api_error(self):
+        client = _login_client()
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.side_effect = _encrypted_login_response({"ResponseCode": "99999"})
+            with pytest.raises(AqualiaApiError) as exc:
+                client._login()
+        assert not isinstance(exc.value, AqualiaAuthError)
+        assert "99999" in str(exc.value)
+
+    def test_unencrypted_response_without_payload_raises_api_error(self):
+        client = _login_client()
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.return_value = _make_response(200, {"OtherField": "value"})
+            with pytest.raises(AqualiaApiError):
+                client._login()
+
+    def test_429_raises_rate_limit_error(self):
+        client = _login_client()
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.return_value = _make_response(429)
+            with pytest.raises(AqualiaRateLimitError):
+                client._login()
+
     def test_token_expiry_set_to_8_hours(self):
-        client = AqualiaClient("12345678A", "pass")
+        client = _login_client()
         before = datetime.now(UTC)
         with patch.object(client.session, "post") as mock_post:
-            mock_post.return_value = _make_response(200, {"Token": "tok"})
+            mock_post.side_effect = _encrypted_login_response({"Token": "tok"})
             client._login()
-        after = datetime.now(UTC)
         delta = client.token_expires_at - before
         assert timedelta(hours=7, minutes=59) < delta <= timedelta(hours=8, seconds=5)
+
+    def test_shorter_server_expiration_wins(self):
+        client = _login_client()
+        expires = datetime.now(UTC) + timedelta(hours=1)
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.side_effect = _encrypted_login_response(
+                {"Token": "tok", "TokenExpirationDate": expires.isoformat()}
+            )
+            client._login()
+        assert abs(client.token_expires_at - expires) < timedelta(seconds=1)
+
+    def test_public_key_fetched_from_web_config_and_cached(self):
+        client = AqualiaClient("12345678A", "pass")
+        pem = _PRIVATE_KEY.public_key().public_bytes(
+            serialization.Encoding.PEM,
+            serialization.PublicFormat.SubjectPublicKeyInfo,
+        )
+        config = {"pkEnc": base64.b64encode(pem).decode()}
+        with patch.object(client.session, "get") as mock_get:
+            mock_get.return_value = _make_response(200, config)
+            first = client._get_public_key()
+            second = client._get_public_key()
+        assert first is second
+        mock_get.assert_called_once()
+        assert mock_get.call_args.args[0] == AqualiaClient.WEB_CONFIG_URL
+
+    def test_missing_public_key_raises_api_error(self):
+        client = AqualiaClient("12345678A", "pass")
+        with patch.object(client.session, "get") as mock_get:
+            mock_get.return_value = _make_response(200, {"BASEURL": "x"})
+            with pytest.raises(AqualiaApiError):
+                client._get_public_key()
 
 
 class TestEnsureToken:
@@ -101,6 +219,74 @@ class TestEnsureToken:
         with patch.object(client, "_login", side_effect=AqualiaAuthError("bad creds")):
             with pytest.raises(AqualiaAuthError):
                 client._ensure_token()
+
+    def test_rate_limit_not_retried(self):
+        # Retrying a 429 is what kept the IP blocked: every HA setup retry fired
+        # three more logins.  Give up at once and let HA's own backoff space it.
+        client = AqualiaClient("12345678A", "pass")
+        with patch.object(
+            client, "_login", side_effect=AqualiaRateLimitError("429")
+        ) as mock_login:
+            with patch("time.sleep") as mock_sleep:
+                with pytest.raises(AqualiaRateLimitError):
+                    client._ensure_token()
+        assert mock_login.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_429_starts_cooldown_shared_across_clients(self):
+        # HA builds a new client on every setup retry, so the cooldown must
+        # outlive the client instance or each retry would hit Aqualia again.
+        first = _login_client()
+        with patch.object(first.session, "post") as mock_post:
+            mock_post.return_value = _make_response(429)
+            with pytest.raises(AqualiaRateLimitError):
+                first._ensure_token()
+
+        second = _login_client()
+        with patch.object(second.session, "post") as mock_post:
+            with pytest.raises(AqualiaRateLimitError):
+                second._ensure_token()
+            mock_post.assert_not_called()
+
+    def test_cooldown_is_per_account(self):
+        blocked = _login_client()
+        with patch.object(blocked.session, "post") as mock_post:
+            mock_post.return_value = _make_response(429)
+            with pytest.raises(AqualiaRateLimitError):
+                blocked._ensure_token()
+
+        other = AqualiaClient("87654321B", "pass")
+        other._public_key = _PRIVATE_KEY.public_key()
+        with patch.object(other.session, "post") as mock_post:
+            mock_post.side_effect = _encrypted_login_response({"Token": "tok"})
+            other._ensure_token()
+        assert other.token == "tok"
+
+    def test_login_allowed_again_after_cooldown(self):
+        client = _login_client()
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.return_value = _make_response(429)
+            with pytest.raises(AqualiaRateLimitError):
+                client._ensure_token()
+
+        api_module._LOGIN_COOLDOWN_UNTIL[client.nif] = datetime.now(UTC) - timedelta(
+            seconds=1
+        )
+        with patch.object(client.session, "post") as mock_post:
+            mock_post.side_effect = _encrypted_login_response({"Token": "tok"})
+            client._ensure_token()
+        assert client.token == "tok"
+
+    def test_retry_after_header_sets_cooldown(self):
+        client = _login_client()
+        resp = _make_response(429)
+        resp.headers = {"Retry-After": "120"}
+        before = datetime.now(UTC)
+        with patch.object(client.session, "post", return_value=resp):
+            with pytest.raises(AqualiaRateLimitError):
+                client._ensure_token()
+        until = api_module._LOGIN_COOLDOWN_UNTIL[client.nif]
+        assert timedelta(seconds=119) < until - before < timedelta(seconds=125)
 
     def test_network_error_retried_three_times(self):
         client = AqualiaClient("12345678A", "pass")
