@@ -68,7 +68,7 @@ La integración crea estas entidades bajo el dispositivo **Aqualia Water Meter**
 
 | Sensor | Unidad | Descripción | Se pone unavailable si… |
 | --- | --- | --- | --- |
-| Consumo total (índice contador) | L | Odómetro del contador. Compatible con **Energy Dashboard** | Sin datos iniciales |
+| Consumo total | L | Índice (odómetro) del contador. Compatible con **Energy Dashboard** | Sin datos iniciales |
 | Última lectura | L | Valor de la última lectura recibida (puede tener 2-3 días de retraso) | Sin datos iniciales |
 | Consumido hoy | L | Suma de lecturas fechadas hoy (0 si Aqualia aún no las envió) | Sin lecturas >7 días |
 | Consumido este mes | L | Suma de lecturas del mes actual | Sin lecturas >7 días |
@@ -105,7 +105,7 @@ La integración crea estas entidades bajo el dispositivo **Aqualia Water Meter**
 
 ### Consumo de agua
 
-El sensor **Consumo total (índice contador)** tiene `device_class: water` y `state_class: total_increasing`. Para añadirlo:
+El sensor **Consumo total** (índice del contador) tiene `device_class: water` y `state_class: total_increasing`. Para añadirlo:
 
 1. Ve a **Ajustes → Dashboards → Energía**.
 2. En la sección **Agua** añade el sensor `sensor.aqualia_water_meter_total_consumption`.
@@ -157,9 +157,39 @@ automation:
 
 > **Nota:** La detección se hace cada 12 horas (intervalo de refresco de facturas). No se genera notificación en el primer arranque, solo cuando se detecta un cambio real de período.
 
+## Solución de problemas
+
+**Todos los sensores en `unavailable`.** Mira el estado de la integración en **Ajustes → Dispositivos y
+servicios → Aqualia**. Si pone *"Reintentando la configuración"*, el motivo aparece al pasar el ratón:
+
+| Motivo | Qué significa | Qué hacer |
+| --- | --- | --- |
+| `429 Too Many Requests` / *Login en pausa tras un 429* | Aqualia está limitando los inicios de sesión de tu cuenta | Nada: la integración espera 30 min (o lo que indique Aqualia) antes de volver a intentarlo. No reinicies HA en bucle: cada intento alarga el bloqueo |
+| *Credenciales inválidas* | Contraseña cambiada o incorrecta | Usa el aviso de **Reautenticación** |
+| *Login sin Token (ResponseCode=…)* o *no se pudo descifrar el login* | Aqualia ha cambiado su login otra vez | Abre un issue con el mensaje completo |
+
+**Versiones anteriores a 0.2.1 dejaron de funcionar en noviembre de 2026**, cuando Aqualia empezó a exigir
+el login cifrado. Actualiza desde HACS y reinicia Home Assistant.
+
+**Los valores no cambian durante días.** Es normal: Aqualia publica las lecturas con 2-3 días de retraso.
+Revisa el sensor *Días desde última lectura*; los derivados pasan a `unavailable` a partir de 7 días.
+
+**Logs de depuración.** Añade a `configuration.yaml` y reinicia:
+
+```yaml
+logger:
+  logs:
+    custom_components.aqualia: debug
+```
+
 ## Notas técnicas
 
 - Usa `DataUpdateCoordinator` con llamadas HTTP en executor (cliente `requests` síncrono).
+- El login replica el cifrado de la oficina virtual: usuario y contraseña viajan cifrados con RSA-OAEP
+  usando la clave pública que publica la propia web, y la respuesta llega cifrada con AES-GCM. Detalles en
+  [DOCS.md](DOCS.md).
+- Si Aqualia responde `429` al login, no se reintenta: se espera 30 minutos (o el `Retry-After`) antes de
+  volver a llamar, para no prolongar el bloqueo.
 - El token JWT se renueva automáticamente antes de expirar (margen de 5 minutos).
 - Las lecturas de Aqualia pueden llegar con retraso y agrupadas. `daily_normalized` divide el valor por los días del gap para normalizar.
 - Si la API devuelve 401, se fuerza un nuevo login y se reintenta una vez.
@@ -177,17 +207,20 @@ automation:
   ISO) se descartan con un aviso en el log en lugar de interrumpir la actualización.
 - El precio estimado (EUR/m³) se calcula como: `media_facturas / (media_diaria_L × días_período / 1000)`, donde el período bimestral se estima a partir de las fechas de emisión de las facturas disponibles.
 
-## Repositorio legacy
+## Add-on legacy
 
-La carpeta `aqualia/` conserva el add-on MQTT original. No es necesaria para la instalación recomendada.
+La carpeta `aqualia/` conserva el add-on MQTT original, predecesor de esta integración. **No se mantiene y
+ya no funciona**: usa el login sin cifrar que Aqualia dejó de aceptar en noviembre de 2026. Si lo usabas,
+desinstálalo y pasa a la integración.
 
 ## Desarrollo
 
 ```bash
 pip install -r requirements-test.txt
-python -m pytest                                   # 232 tests
-python -m pytest --cov=custom_components/aqualia   # cobertura
+python3 -m pytest          # tests (no hace falta instalar Home Assistant)
+scripts/ci.sh              # CI local completa: pytest + hassfest + HACS
 ```
 
-Los tests no requieren tener Home Assistant instalado: `tests/ha_stubs.py` aporta la superficie
-mínima de HA. `voluptuous` sí es necesario, porque es lo que construye los esquemas del config flow.
+- [DEVELOPMENT.md](DEVELOPMENT.md) — entorno, arquitectura, tests y cómo probar en un HA real.
+- [DOCS.md](DOCS.md) — referencia de la API de Aqualia.
+- [RELEASING.md](RELEASING.md) — CI local y publicación de versiones.

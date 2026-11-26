@@ -147,10 +147,22 @@ ese patrón para lógica nueva del coordinator.
 Base: `https://oficinavirtualapi.aqualia.es/ofcvirtual`. Requiere cabeceras `Application-Id: 1`,
 `Country: 34` y `Origin`/`Referer` de `oficinavirtual.aqualia.es`; sin ellas rechaza las peticiones.
 
-El token JWT se asume válido 8 h con margen de renovación de 5 min. Ante un `401` el cliente limpia
-el token, vuelve a loguear y reintenta **una** vez (patrón `_request_*` devuelve `None` en 401 →
-el método público reintenta). El login tiene backoff de 5/15/60 s en errores de red, pero
-`AqualiaAuthError` (401/403) se propaga inmediatamente sin reintentos.
+**El login va cifrado** (desde 11/2026 la API rechaza credenciales en claro): `User`, `Password` y una
+clave AES aleatoria (`SessionKey`) se cifran con RSA-OAEP/SHA-256 usando `pkEnc` de
+`https://oficinavirtual.aqualia.es/config/config.json`, y la respuesta `{"Payload"}` se descifra con
+AES-GCM (IV = 12 primeros bytes). `ResponseCode "99980"` = credenciales incorrectas. Solo el login va
+cifrado; consumo, contratos y facturas siguen en claro con `Bearer`. Protocolo completo en `DOCS.md`.
+
+El token JWT se asume válido 8 h (o `TokenExpirationDate` si es menor) con margen de renovación de
+5 min. Ante un `401` el cliente limpia el token, vuelve a loguear y reintenta **una** vez (patrón
+`_request_*` devuelve `None` en 401 → el método público reintenta). El login hace hasta 3 intentos
+con esperas de 5 y 15 s en errores de red, pero `AqualiaAuthError` (401/403/99980) se propaga
+inmediatamente.
+
+**429 en el login:** Aqualia limita los logins por cuenta, y los reintentos de arranque de HA (cada
+1-2 min) mantenían el bloqueo indefinidamente. Un 429 lanza `AqualiaRateLimitError` sin reintentos y
+abre una pausa de 30 min (o `Retry-After`) en `_LOGIN_COOLDOWN_UNTIL`, a nivel de **módulo** y por
+NIF, porque HA crea un `AqualiaClient` nuevo en cada reintento. No la muevas a la instancia.
 
 Campos de las lecturas: `DateTimeConsumptionCurve`, `ConsumptionValue` (litros del intervalo),
 `ReadingIndex` (odómetro acumulado).
