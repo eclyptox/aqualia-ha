@@ -36,7 +36,7 @@ aqualia-ha-addon/                    # Raíz del proyecto
     ├── DOCS.md                      # Documentación técnica (480 líneas)
     ├── DEVELOPMENT.md               # Guía para desarrolladores (150 líneas)
     ├── BUILD_SUMMARY.md             # Resumen de construcción
-    ├── GITHUB_SETUP.md              # Publicar en GitHub
+    ├── RELEASING.md                 # Publicar una versión (integración)
     ├── INDEX.md                     # Este archivo
     └── .gitignore                   # Ficheros a ignorar
 
@@ -76,10 +76,9 @@ aqualia-ha-addon/                    # Raíz del proyecto
    - Build Docker
    - Guías de cambios comunes
 
-3. **Publicar:** [GITHUB_SETUP.md](GITHUB_SETUP.md)
-   - Crear repo
-   - CI/CD
-   - Releases
+3. **Publicar:** [RELEASING.md](RELEASING.md)
+   - CI local (pre-push)
+   - Versionado y releases para HACS
 
 ### Resumen técnico: [BUILD_SUMMARY.md](BUILD_SUMMARY.md)
 
@@ -236,7 +235,7 @@ cat QUICKSTART.md
 1. Lee [DEVELOPMENT.md](DEVELOPMENT.md)
 2. Examina todos los módulos Python
 3. Mira el Dockerfile para entender el build
-4. Lee [GITHUB_SETUP.md](GITHUB_SETUP.md) para CI/CD
+4. Lee [RELEASING.md](RELEASING.md) para la CI local y las releases
 
 ---
 
@@ -271,7 +270,7 @@ cat QUICKSTART.md
 → Sí, ver [DEVELOPMENT.md](DEVELOPMENT.md)
 
 **¿Cómo publico mi propia versión?**
-→ Ver [GITHUB_SETUP.md](GITHUB_SETUP.md)
+→ Ver [RELEASING.md](RELEASING.md)
 
 ---
 
