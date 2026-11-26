@@ -1,358 +1,150 @@
-# Documentación Técnica - Aqualia Water Consumption Addon
+# Referencia de la API de Aqualia
 
-## Arquitectura del Addon
+Documentación de la API no oficial de la oficina virtual de Aqualia tal y como la usa
+`custom_components/aqualia/api.py`. Aqualia no la publica: todo sale de observar la web
+`https://oficinavirtual.aqualia.es/` y puede cambiar sin aviso (como pasó con el login en noviembre
+de 2026).
 
-```
-aqualia/
-├── config.yaml              # Manifiesto del addon (HA lo lee)
-├── Dockerfile               # Construcción del contenedor
-├── run.sh                   # Entrypoint (inicia main.py)
-├── requirements.txt         # Dependencias Python (requests, paho-mqtt)
-└── app/
-    ├── main.py              # Bucle principal
-    ├── config_loader.py     # Lee options.json del addon
-    ├── aqualia_client.py    # Cliente API (auth + consumo)
-    ├── token_cache.py       # Caché JWT persistente
-    ├── consumption_parser.py # Análisis de lecturas
-    └── ha_mqtt.py           # MQTT Discovery para HA
-```
+## Base y cabeceras
 
-## Flujo de ejecución
+Base: `https://oficinavirtualapi.aqualia.es/ofcvirtual`
 
-```
-1. main.py inicia
-   ├─ Carga config desde /data/options.json (config_loader.py)
-   ├─ Crea cliente Aqualia (aqualia_client.py)
-   └─ Conecta a MQTT broker (ha_mqtt.py)
+Todas las peticiones llevan estas cabeceras; sin ellas la API las rechaza:
 
-2. Bucle principal cada poll_interval_minutes:
-   ├─ Obtiene lecturas: aqualia.get_consumption()
-   │  ├─ Valida token (renueva si expirado)
-   │  ├─ Fetch XSRF-TOKEN desde oficinavirtual.aqualia.es
-   │  └─ POST al endpoint GetContractConsumptionCurve
-   │
-   ├─ Procesa lecturas: ConsumptionParser(readings)
-   │  ├─ Ordena por fecha
-   │  ├─ Calcula daily_normalized (divide por gap)
-   │  ├─ Calcula avg_daily_30d (media móvil)
-   │  ├─ Calcula ratio_vs_avg (%)
-   │  └─ Calcula otros metrics
-   │
-   └─ Publica en MQTT: mqtt.publish_metrics(metrics)
-      ├─ Config topics (MQTT Discovery)
-      └─ State topics
-```
+| Cabecera | Valor |
+| --- | --- |
+| `Application-Id` | `1` |
+| `Country` | `34` |
+| `Origin` | `https://oficinavirtual.aqualia.es` |
+| `Referer` | `https://oficinavirtual.aqualia.es/` |
+| `Accept-Language` | `es-es` |
+| `Content-Type` | `application/json; charset=UTF-8` |
+| `X-Requested-With` | `XMLHttpRequest` |
 
-## Gestión del Token JWT
+Las peticiones autenticadas añaden `Authorization: Bearer <Token>`.
 
-### TokenCache (`app/token_cache.py`)
+Las fechas se envían en ISO 8601 UTC con `Z` (`2026-11-26T06:00:00Z`).
 
-- **Ubicación:** `/share/aqualia_token_cache.json` (persiste entre reinicios)
-- **Formato:**
-  ```json
-  {
-    "token": "eyJhbGciOiJIUzI1NiIs...",
-    "expires_at": "2026-05-15T12:34:56.789012"
-  }
-  ```
+## Login cifrado
 
-### Renovación automática
+`POST /auth/v1/api/auth/Auth/Login`
 
-1. Al arrancar, `_ensure_token()` busca en caché
-2. Si no existe o está expirado, hace login
-3. Si login devuelve 401 en `get_consumption()`, limpia caché y reinicia
-4. Margen de seguridad: -5 minutos antes de expiración
+Desde noviembre de 2026 el login rechaza las credenciales en claro con
+`500 "The User parameter does not meet the encryption criteria."`. La web cifra los campos así, y la
+integración hace lo mismo:
 
-### Autenticación (flujo)
+1. **Clave pública.** Se lee de la configuración de la web,
+   `https://oficinavirtual.aqualia.es/config/config.json`, campo `pkEnc`: base64 de un PEM
+   `-----BEGIN PUBLIC KEY-----` (RSA 2048). No se escribe en el código para sobrevivir a una
+   rotación; se cachea por instancia del cliente.
+2. **Clave de sesión.** 32 bytes aleatorios (clave AES-256).
+3. **Cuerpo.** Cada campo sensible se cifra con RSA-OAEP (MGF1 y hash SHA-256, sin etiqueta) y se
+   envía en base64:
 
-```
-GET /oficinavirtual.aqualia.es/
-├─ Response incluye cookie XSRF-TOKEN
-└─ Se guarda en session.cookies
+   ```json
+   {
+     "LoginType": 1,
+     "User": "<RSA-OAEP(nif)>",
+     "Password": "<RSA-OAEP(contraseña)>",
+     "SessionKey": "<RSA-OAEP(clave AES de 32 bytes)>"
+   }
+   ```
 
-POST /ofcvirtual/auth/v1/api/auth/Auth/Login
-├─ Header X-XSRF-TOKEN: <cookie obtenida>
-├─ Body: {LoginType: 1, User: NIF, Password: pass}
-└─ Response: {Token: "Bearer JWT", ...}
-```
+4. **Respuesta.** `200 {"Payload": "<base64>"}`. El payload es `iv (12 bytes) || ciphertext+tag`,
+   cifrado con AES-GCM usando la clave de sesión. Descifrado, es un JSON:
 
-## Análisis de Lecturas (ConsumptionParser)
+   | Campo | Notas |
+   | --- | --- |
+   | `ResponseCode` | `"00001"` = correcto. `"99980"` = usuario o contraseña incorrectos |
+   | `Token` | JWT para el resto de peticiones. Solo presente si el login es correcto |
+   | `TokenExpirationDate` | Caducidad del token; la integración usa la menor entre esta y 8 h |
+   | `Name`, `Email`, `Phone`… | Datos del titular (no se usan) |
 
-### El problema: lecturas acumuladas con gaps
+La web consulta antes `GET /auth/v1/api/auth/Auth/GetCSRFToken` y pasa un reCAPTCHA v3
+(`/auth/v1/api/auth/Auth/Recaptcha`), pero ninguno de los dos es necesario para que el login funcione.
 
-Aqualia envía **lecturas diarias** pero pueden:
-- Llegar **2-3 días después**
-- Estar **acumuladas** (si no leen 3 días, 1 lectura con triple consumo)
+### Errores del login
 
-### Solución: normalización
+| Respuesta | Tratamiento en la integración |
+| --- | --- |
+| `401` / `403` | `AqualiaAuthError` → reautenticación en HA |
+| `ResponseCode 99980` sin `Token` | `AqualiaAuthError` → reautenticación en HA |
+| Otro `ResponseCode` sin `Token` | `AqualiaApiError` (transitorio, HA reintenta) |
+| `429 Too Many Requests` | `AqualiaRateLimitError`: sin reintentos y pausa de 30 min por NIF (o `Retry-After`) |
+| Error de red / 5xx | Hasta 3 intentos con esperas de 5 y 15 s |
 
-```
-reading_gap_days = diferencia de fechas entre esta lectura y la anterior
-daily_normalized = last_value / reading_gap_days
+El límite de `429` parece aplicarse **por cuenta**, no por IP. Los reintentos de arranque de Home
+Assistant (cada 1-2 min) bastaban para mantenerlo activo de forma indefinida; por eso la pausa vive a
+nivel de módulo y sobrevive a que HA cree un cliente nuevo en cada reintento.
 
-Ejemplo:
-- Lectura 1: 100L (1 día)
-- Lectura 2: 300L (3 días después) → normalizado = 300/3 = 100L/día
-```
+## Contratos
 
-### Métricas calculadas
+`GET /contract/v1/api/contract/Contract/GetUserLinkedContracts` (autenticado)
 
-| Métrica | Fórmula | Ejemplo |
-|---------|---------|---------|
-| `last_value` | último valor leído | 250 L |
-| `daily_normalized` | `last_value / gap_days` | 83.33 L/d |
-| `avg_daily_30d` | media de valores normalizados (30d) | 80.5 L/d |
-| `ratio_vs_avg` | `(daily_normalized / avg_30d) * 100` | 103.5 % |
-| `monthly_total` | suma de lecturas del mes actual | 2420 L |
-| `days_since_reading` | días desde última lectura | 3 |
-| `reading_gap_days` | días que cubre última lectura | 3 |
+Devuelve `ContractDetails[]`. De cada elemento se usan `ContractInfo` (`CacCode`, `ContractCode`,
+`InstallationCode`, `ContractNumber`, `MunicipalityCode`, `EntryDate`, `ContractStatusCode`,
+`ContractStatus`) y `SupplyAddress` para mostrar el selector del config flow.
 
-## MQTT Discovery
+Si responde `401`/`403`/`404`/`405` o una lista vacía, el config flow pasa a pedir los códigos a mano.
 
-### Topics de configuración
+## Consumo
 
-```
-homeassistant/sensor/aqualia/{entity_id}/config
-
-Ejemplo:
-homeassistant/sensor/aqualia/daily_normalized/config
-```
-
-### Payload de discovery
+`POST /meter/v1/api/meter/Meter/GetContractConsumptionCurve` (autenticado)
 
 ```json
 {
-  "unique_id": "aqualia_daily_normalized",
-  "name": "Water Meter - Daily Normalized Consumption",
-  "state_topic": "aqualia/sensor/daily_normalized",
-  "unit_of_measurement": "L/d",
-  "device_class": "water",
-  "state_class": "measurement",
-  "icon": "mdi:water-percent",
-  "device": {
-    "identifiers": ["aqualia_water"],
-    "name": "Aqualia Water Meter",
-    "manufacturer": "Aqualia",
-    "model": "Water Meter"
+  "DateFrom": "2026-09-27T06:00:00Z",
+  "DateTo": "2026-11-26T06:00:00Z",
+  "Contract": {
+    "CacCode": 0,
+    "ContractCode": 0,
+    "InstallationCode": 0,
+    "ContractNumber": "00000-1/1-000000"
   }
 }
 ```
 
-### Topics de estado
+La respuesta puede ser la lista de lecturas directamente o un objeto con `ConsumptionCurves` o `Data`.
+Campos de cada lectura:
 
-```
-aqualia/sensor/last_value                    # L
-aqualia/sensor/daily_normalized              # L/d (número, 2 decimales)
-aqualia/sensor/avg_30d                       # L/d (número, 2 decimales)
-aqualia/sensor/ratio_vs_avg                  # % (número, 1 decimal)
-aqualia/sensor/monthly_total                 # L (número entero)
-aqualia/sensor/days_since_reading            # d (número entero)
-aqualia/sensor/reading_gap                   # d (número entero)
-aqualia/sensor/last_reading_date             # ISO string
-```
+| Campo | Significado |
+| --- | --- |
+| `DateTimeConsumptionCurve` | Fecha de la lectura (ISO) |
+| `ConsumptionValue` | Litros consumidos en el intervalo |
+| `ReadingIndex` | Odómetro del contador en litros. A veces llega vacío o `0`: se trata como "sin dato", nunca como 0 |
 
-En caso de error: todos los topics reciben `"unavailable"`
+Las lecturas llegan con 2-3 días de retraso y a veces agrupadas (una lectura cubre varios días).
 
-## Automatizaciones recomendadas
+## Facturas
 
-### 1. Alerta de consumo elevado
+`POST /invoice/v1/api/invoice/Invoice/GetList` (autenticado, timeout de 30 s)
 
-Triggers cuando:
-- `ratio_vs_avg > 150%` AND
-- `reading_gap_days < 3` AND
-- `days_since_reading < 5`
+Necesita el `ContractIdentifier` completo, no solo los 4 campos del contrato:
 
-Copia esto a **Automations** en HA:
-
-```yaml
-alias: "🚨 Aqualia - Consumo elevado"
-description: "Alerta si consumo > 150% de media"
-trigger:
-  - platform: numeric_state
-    entity_id: sensor.aqualia_ratio_vs_avg
-    above: 150
-condition:
-  - condition: numeric_state
-    entity_id: sensor.aqualia_reading_gap_days
-    below: 3
-  - condition: numeric_state
-    entity_id: sensor.aqualia_days_since_reading
-    below: 5
-action:
-  - service: notify.notify
-    data:
-      title: "⚠️ Consumo de agua anómalo"
-      message: |
-        Consumo normalizado: {{ state_attr('sensor.aqualia_daily_normalized', '') }} L/d
-        Media 30d: {{ state_attr('sensor.aqualia_avg_30d', '') }} L/d
-        Ratio: {{ states('sensor.aqualia_ratio_vs_avg') }}%
-mode: single
+```json
+{
+  "StartDate": "2024-11-26T06:00:00Z",
+  "EndDate": "2026-11-26T06:00:00Z",
+  "ContractIdentifier": {
+    "CacCode": 0,
+    "ContractCode": 0,
+    "ContractNumber": "00000-1/1-000000",
+    "InstallationCode": 0,
+    "MunicipalityCode": "00000",
+    "EntryDate": "…",
+    "ContractStatusCode": 0,
+    "ContractStatus": "…",
+    "styleClass": ""
+  },
+  "HasDebt": null
+}
 ```
 
-### 2. Alerta de sin lecturas
+Respuesta: `PaymentDocuments[]`, de los que se usan `IssueDate`, `DueDate`, `Period`,
+`TotalAmount`, `PendingAmount` y `Status`. Importes y fechas llegan a veces a `null` o en formatos
+no ISO; se descartan en vez de propagar el error.
 
-Triggers cuando no hay lectura nueva en >5 días:
+## Respuestas `401` en peticiones autenticadas
 
-```yaml
-alias: "📊 Aqualia - Sin lecturas"
-description: "Alerta si más de 5 días sin lectura"
-trigger:
-  - platform: numeric_state
-    entity_id: sensor.aqualia_days_since_reading
-    above: 5
-action:
-  - service: notify.notify
-    data:
-      title: "⚠️ Sin lecturas de agua"
-      message: "No hay lecturas hace {{ states('sensor.aqualia_days_since_reading') }} días. Última lectura: {{ states('sensor.aqualia_last_reading_date') }}"
-mode: single
-```
-
-### 3. Alerta de error de API
-
-Triggers cuando el sensor principal no está disponible >4h:
-
-```yaml
-alias: "❌ Aqualia - Error de API"
-description: "Alerta si el addon falla"
-trigger:
-  - platform: state
-    entity_id: sensor.aqualia_last_value
-    to: "unavailable"
-    for:
-      hours: 4
-action:
-  - service: notify.notify
-    data:
-      title: "❌ Error del addon Aqualia"
-      message: "El addon no puede conectar con la API. Revisa los logs del addon."
-mode: single
-```
-
-### 4. Tarjeta Lovelace personalizada
-
-Copia esto a una tarjeta **Manual YAML** en tu dashboard:
-
-```yaml
-type: custom:stack-in-card
-cards:
-  - type: entities
-    title: "💧 Aqualia - Agua"
-    show_header_toggle: false
-    entities:
-      - entity: sensor.aqualia_daily_normalized
-        name: "Hoy (normalizado)"
-      - entity: sensor.aqualia_avg_30d
-        name: "Promedio 30 días"
-      - entity: sensor.aqualia_ratio_vs_avg
-        name: "Ratio vs media"
-        icon: mdi:percent
-      - entity: sensor.aqualia_monthly_total
-        name: "Total mes"
-      - entity: sensor.aqualia_days_since_reading
-        name: "Días sin lectura"
-        icon: mdi:calendar-clock
-      - entity: sensor.aqualia_last_reading_date
-        name: "Última lectura"
-        icon: mdi:calendar-check
-
-  - type: history-stats
-    title: "Consumo últimas 24h"
-    entities:
-      - sensor.aqualia_daily_normalized
-    period_keys:
-      - bar
-    stat_period_duration: 24h
-
-  - type: custom:gauge-card
-    entity: sensor.aqualia_ratio_vs_avg
-    name: "Ratio vs media"
-    min: 0
-    max: 200
-    severity:
-      green: 0
-      yellow: 120
-      red: 150
-```
-
-## Debugging
-
-### Acceder a los logs del addon
-
-Home Assistant → Ajustes → Complementos → Aqualia → **Logs**
-
-### Habilitar debug logging (si fuera necesario)
-
-Modifica `app/main.py`:
-```python
-logging.basicConfig(
-    level=logging.DEBUG,  # Cambiar INFO a DEBUG
-    ...
-)
-```
-
-### Ver topics MQTT
-
-```bash
-mosquitto_sub -h localhost -t "aqualia/#" -v
-```
-
-### Verificar JWT en caché
-
-```bash
-cat /share/aqualia_token_cache.json | jq .
-```
-
-## Requisitos de construcción Docker
-
-```dockerfile
-FROM ghcr.io/home-assistant/{amd64|aarch64|armv7}-base:3.19
-- Python 3.11
-- requests 2.31.0
-- paho-mqtt 1.6.1
-```
-
-Test de construcción:
-```bash
-cd aqualia/
-docker build -t aqualia-ha-addon:latest .
-```
-
-## Configuración de permisos en MQTT
-
-Si tu Mosquitto require autenticación:
-
-1. Crea usuario en Mosquitto:
-   ```bash
-   mosquitto_passwd -c /mosquitto/config/passwd aqualia
-   ```
-
-2. Configura el addon con ese usuario/contraseña
-
-3. Asegúrate de que el usuario tiene permisos:
-   ```
-   user aqualia
-   topic write aqualia/#
-   topic write homeassistant/sensor/aqualia/#
-   ```
-
-## Performance y escalabilidad
-
-- **Consumo de RAM:** ~50-100 MB
-- **CPU:** Mínimo, principalmente en espera
-- **Ancho de banda:** ~50-100 KB por consulta
-- **Almacenamiento:** ~1 KB (token cache)
-
-## Solución de problemas comunes
-
-| Error | Causa | Solución |
-|-------|-------|----------|
-| `Login falló después de reintentos` | NIF/pass incorrecto | Verifica credenciales en config |
-| `No se encontró XSRF-TOKEN` | API de Aqualia cambió | Reporta issue en GitHub |
-| `401 Unauthorized` | Token expirado | Se renueva automáticamente |
-| `Connection refused (MQTT)` | Mosquitto no activo | Inicia Mosquitto addon |
-| `Sensor unavailable` | Error en get_consumption() | Revisa logs, reinicia addon |
-
-## Licencia
-
-MIT
+Ante un `401` el cliente borra el token, vuelve a iniciar sesión y reintenta **una** vez. Un segundo
+`401`, o un `403`, se convierte en `AqualiaAuthError`.
